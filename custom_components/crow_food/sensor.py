@@ -1,7 +1,9 @@
 """Sensors: how many things are in each smart list, storage and shopping list, and the waste score."""
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from datetime import datetime
+
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
@@ -31,7 +33,8 @@ def device_info() -> DeviceInfo:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add: AddEntitiesCallback) -> None:
     food: CrowFood = hass.data[DOMAIN]
-    entities: list[SensorEntity] = [SmartSensor(food, k) for k in SMART] + [WasteSensor(food)]
+    entities: list[SensorEntity] = [SmartSensor(food, k) for k in SMART] + [WasteSensor(food)] + [
+        ValueSensor(food), MonthMoneySensor(food, "thrown"), MonthMoneySensor(food, "spent"), ToBuySensor(food), NextDateSensor(food)]
     known: dict[str, StorageSensor] = {}
     for sid in food.data["storages"]:
         known[sid] = StorageSensor(food, sid)
@@ -165,3 +168,149 @@ class StorageSensor(_Base):
     def extra_state_attributes(self) -> dict:
         r = self._row
         return {"kind": r.get("kind"), "shared_with": "everyone" if not r.get("users") else len(r["users"])}
+
+
+# ── Money, what to buy and the next date ─────────────────────────────────────────
+def _currency(food: CrowFood) -> str:
+    return food.settings.get("currency") or food.hass.config.currency or "GBP"
+
+
+def _month_start() -> datetime:
+    return dt_util.start_of_local_day().replace(day=1)
+
+
+class ValueSensor(_Base):
+    """Food at home: what everything in storage is worth (its price, or the product's usual price)."""
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:cash"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, food: CrowFood) -> None:
+        super().__init__(food)
+        self._attr_unique_id = f"{DOMAIN}_value"
+        self._attr_name = "Food at home"
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return _currency(self.food)
+
+    def _parts(self) -> tuple[float, int, int]:
+        food, total, priced, n = self.food, 0.0, 0, 0
+        for it in food.smart(None)["all"]:
+            p = food.data["products"].get(it.get("product")) or {}
+            price = float(it.get("price") or p.get("price") or 0)
+            n += 1
+            if price > 0:
+                priced += 1
+                total += float(it.get("qty") or 0) * price
+        return round(total, 2), priced, n
+
+    @property
+    def native_value(self) -> float:
+        return self._parts()[0]
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        _, priced, n = self._parts()
+        return {"items": n, "items_with_a_price": priced}
+
+
+class MonthMoneySensor(_Base):
+    """Thrown away this month, or spent this month (shopping with a price): money, from the 1st."""
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, food: CrowFood, kind: str) -> None:
+        super().__init__(food)
+        self.kind = kind
+        self._attr_unique_id = f"{DOMAIN}_{kind}_month"
+        self._attr_name = "Thrown away this month" if kind == "thrown" else "Spent this month"
+        self._attr_icon = "mdi:delete-variant" if kind == "thrown" else "mdi:cart-check"
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return _currency(self.food)
+
+    @property
+    def last_reset(self) -> datetime:
+        return _month_start()
+
+    def _logs(self) -> tuple[list[dict], object]:
+        from .const import STATUS_ADDED, STATUS_BOUGHT, STATUS_THROWN
+        from .reports import _Ctx
+        ctx = _Ctx(self.food, None, None, _month_start().date())
+        if self.kind == "thrown":
+            return ctx.period(STATUS_THROWN), ctx
+        return [l for l in ctx.period(STATUS_ADDED, STATUS_BOUGHT) if ctx.is_purchase(l)], ctx
+
+    @property
+    def native_value(self) -> float:
+        logs, ctx = self._logs()
+        return round(sum(ctx.val(l) for l in logs), 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        logs, ctx = self._logs()
+        out = {"count": len(logs), "since": _month_start().date().isoformat()}
+        if self.kind == "thrown":
+            names: dict[str, int] = {}
+            for l in logs:
+                names[ctx.name(l)] = names.get(ctx.name(l), 0) + 1
+            out["most"] = [n for n, _ in sorted(names.items(), key=lambda kv: -kv[1])[:10]]
+        return out
+
+
+class ToBuySensor(_Base):
+    """To buy: running low and not on a shopping list yet (what's on one already isn't counted)."""
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:cart-arrow-down"
+
+    def __init__(self, food: CrowFood) -> None:
+        super().__init__(food)
+        self._attr_unique_id = f"{DOMAIN}_to_buy"
+        self._attr_name = "To buy"
+
+    def _rows(self) -> list[dict]:
+        from .notify import low_unlisted
+        return low_unlisted(self.food)
+
+    @property
+    def native_value(self) -> int:
+        return len(self._rows())
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"items": [{"name": r["name"], "left": round(float(r["stock"]), 3), "minimum": r["min"], "need": r["need"]} for r in self._rows()][:50]}
+
+
+class NextDateSensor(_Base):
+    """Next best-before: the date the next thing in storage goes off, and what it is."""
+    _attr_device_class = SensorDeviceClass.DATE
+    _attr_icon = "mdi:calendar-clock"
+
+    def __init__(self, food: CrowFood) -> None:
+        super().__init__(food)
+        self._attr_unique_id = f"{DOMAIN}_next_date"
+        self._attr_name = "Next best-before"
+
+    def _next(self) -> tuple[str | None, list[dict]]:
+        today = dt_util.now().date().isoformat()
+        rows = [i for i in self.food.smart(None)["all"] if i.get("expires") and i["expires"] >= today]
+        if not rows:
+            return None, []
+        day = min(i["expires"] for i in rows)
+        return day, [i for i in rows if i["expires"] == day]
+
+    @property
+    def native_value(self):
+        from datetime import date
+        day, _ = self._next()
+        return date.fromisoformat(day) if day else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        _, rows = self._next()
+        names = list(dict.fromkeys(self.food.name_of(i) for i in rows))
+        return {"products": names, "product": names[0] if names else None}

@@ -66,4 +66,5 @@ add_to_shopping_list:
           step: 0.01
           mode: box
 send_reminder:
+send_weekly_report:
 backup:

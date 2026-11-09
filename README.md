@@ -8,8 +8,12 @@ Everything is **private to your household** — products, photos and history are
 
 > **AI features are optional and off by default.** Turn on **AI Features** in the card editor to unlock them — they use the AI Task you've already set up in Home Assistant. With AI off, everything else in the card works as normal.
 
-![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.8+-blue)
-![Marketplace](https://img.shields.io/badge/Marketplace-Custom-orange)
+[![Marketplace](https://img.shields.io/badge/Marketplace-Custom-orange)](https://hacs.xyz/docs/marketplace/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.8+-blue)](https://www.home-assistant.io/)
+
+If you enjoy Crow Food, you can support its development:
+
+<a href="https://buymeacoffee.com/jamesmcginnis"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20Me%20a%20Coffee&emoji=&slug=jamesmcginnis&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me a Coffee" height="40"></a>
 
 **Step 1 — Add the repository to the Marketplace:**
 
@@ -55,26 +59,30 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 
 ## Key Features
 
-- **Overview** — a Today line (what to use today, what's running low, what's gone off), the numbers for Use Soon, Open, Gone Off, Running Low and Everything, **Coming Up** (photos of what goes off today, tomorrow, this week and later), then your storages and lists as tiles. Each storage tile shows how fresh things are inside, and any sensors you've given it
-- **Freshness at a glance** — a coloured edge on every item (green fresh, yellow use soon, orange today, red gone off), with a word only when it's soon, and a small picture of whoever added it. Storages group by freshness to start with
-- **Item page** — tap something at home for a big photo, a freshness ring, one row of actions (Consumed, Thrown, Open, Freeze, Buy) and folding sections: where it is in your kitchen, how long it keeps, and its history
+- **Overview** — **Photo Strip** (everything in every storage, in a random order, drifting slowly across the top; tap one for its page; each storage's page can have its own, switched on per storage in the editor under Storages & Lists, where tapping a photo jumps to its row), a Today line (what to use today, what's running low, what's gone off), the numbers for Use Soon, Open, Gone Off, Running Low and Everything, **Coming Up** (photos of what goes off today, tomorrow, this week and later), then your storages and lists as tiles. Each storage tile shows how fresh things are inside, and any sensors you've given it
+- **Freshness at a glance** — a coloured edge on every item (green fresh, yellow use soon, orange today, red gone off), with a word only when it's soon, and a small picture of whoever added it. Storages group by category to start with, or by freshness from each storage's ⋯ menu
+- **Item page** — tap something at home for a big photo, a freshness ring, one row of actions (Consume, Throw, Open, Freeze, Buy) and folding sections: where it is in your kitchen, how long it keeps, and its history
 - **Sensors on storages** — give a storage a temperature sensor and a door sensor (Edit → Sensors) and its tile and page show the reading, and when the door's open
 - **Ask** — the speech bubble at the top answers “Do we have tuna?” and the like straight away, even with the AI off
 - **Storages** — as many as you like, with their own colour and icon, nested up to three deep, shared with everyone or only some people
 - **Smart lists** — All, Open, Soon to be Expired, Expired, Soon to Run Out and Not Bought Lately
 - **Not Bought Lately** — products nobody has bought or used for a while (6 months to start with), highlighted on the Overview with a note to the phones you choose; swipe right to Keep, left to Delete (with Undo), or Select several from the ⋯ menu
 - **Shopping lists** — grouped by shop with running totals, a Bought section and **Put Away**, which sends everything back to where it usually lives
-- **Shopping and Basket** — every household has a Shopping list (for buying) and a Basket (for choosing what to eat). They can't be renamed, changed or deleted; lists you make yourself can
-- **Products** — photos, barcodes, categories, tags, package sizes, prices, links, notes and a minimum quantity
-- **Swipes** — swipe left for Edit and Delete, swipe right to mark something consumed (or bought, on a shopping list)
+- **Shopping and Basket** — every household has a Shopping list and a Basket, both for buying: swipe right to mark something bought, the same on either. They can't be renamed, changed or deleted; lists you make yourself can
+- **This Week** — once a week, at the day and time chosen in the editor (Reminders), a phone note to the people chosen for it: what's running low and isn't on a shopping list yet, and what's likely to run out in the week ahead, with Add them to Shopping. Tapping it opens the This Week report (Reports → In Stock), which can be saved as a PDF like the other reports. Send This Week Now in the editor, or the `crow_food.send_weekly_report` action, sends it straight away
+- **Saved receipts** — the receipt or order PDF you added from is kept with what it added, in Receipts (⋯ menu) and on each item's page; only administrators can see them. Pictures are made smaller overnight (WebP, still readable), receipts nothing was added from aren't kept, and they're deleted after the chosen time. They're in /config/crow_food/receipts, so Home Assistant's own backups include them
+- **Products** — photos, barcodes, categories, tags, package sizes, prices, links, notes and a minimum quantity (optionally not counting opened ones, for things you like to keep a spare of: opening the last sealed one is when it runs low, and Top Up Shopping adds another)
+- **Swipes** — swipe left for Edit and Delete, swipe right to mark something consumed or thrown (or bought, on a shopping list)
+- **Photos full size** — tap the big photo at the top of a product's page to see it full size; pinch or double tap to zoom
 - **Press and hold** — Consumed, Thrown, Move, Min quantity, Open, Buy, Print label, Edit, History, Delete and Ask AI
 - **Barcode scanning** — with the phone's camera (including the iPhone), new barcodes looked up on Open Food Facts by Home Assistant
 - **PDFs** — printable lists and labels (A4 sheets of 21)
 - **Daily reminder** — expiring, expired and running-low food, sent to the phones of the people you choose
-- **Buttons on the notes** — press and hold a note on an iPhone (or look under it on Android): **Freeze them** moves what should be frozen today into the freezer (after you unlock), **Meal ideas** opens Use It Up, and **Add to Shopping…** lets you type things straight onto the Shopping list (on every note)
+- **Buttons on the notes** — press and hold a note on an iPhone (or look under it on Android): **Freeze them** moves what should be frozen today into the freezer (after you unlock), **Meal ideas** opens Use It Up, **Add All … Low to Shopping** (daily) and **Add All … to Shopping** (This Week) add what's needed in one go, **Choose What to Add** opens This Week to pick, and **Add Something to Shopping…** (or **Add Something Else…**) lets you type things straight onto the Shopping list
 - **Sensors, to-do lists and actions** — for automations and Assist
 - **Classic or Glass** — light or dark, with your own accent colour
 - **Full Screen** — from the ⋯ menu, or straight away when the dashboard opens
+- **Computers and tablets** — a sidebar with your storages, lists and smart lists, and a wider Overview, when the card is wide enough; on a smaller tablet held upright the sidebar shows just its icons
 
 ---
 
@@ -106,12 +114,13 @@ The editor is laid out as a list of pages, each with **This Card** settings (onl
 
 | Page | What's there |
 |---|---|
-| **General** | Startup screen, reopen where you left off, Full Screen in the ⋯ menu, start in full screen, Classic or Glass, glass strength, light/dark, Home Assistant theme, accent colour, glass popups and bars, card height, animations, vibration |
+| **General** | Startup screen, reopen where you left off, Full Screen in the ⋯ menu, start in full screen, wide screen layout, Classic or Glass, glass strength, light/dark, Home Assistant theme, accent colour, glass popups and bars, card height, animations, vibration |
 | **Overview** | Consumed & Thrown, which smart lists show, sections; *Household:* how far ahead Soon to be Expired looks, currency |
-| **Storages & Lists** | Photos, tags, links, grouping, sorting, full swipes, asking before deleting; *Household:* shopping lists as to-do lists (off to start with), Open Food Facts, how long history is kept |
+| **Storages & Lists** | Photos, tags, links, grouping, sorting; *Household:* shopping lists as to-do lists (off to start with), Open Food Facts, how long history is kept |
 | **Reminders** | *Household:* who gets the daily reminder, what time, and what about |
 | **AI** | *Household:* AI Features, which AI Task, and each feature |
-| **Import & Backups** | *Household:* import and export CSV, nightly backups and restoring them |
+| **Import & Backups** | *Household:* import and export CSV, import from Grocy (locations, products with barcodes and pictures, stock and shopping lists; run it again to bring in only what's new, nothing is changed or deleted in either), nightly backups and restoring them, Keep Receipts (on to start with) and how long for (1 year to start with) |
+| **Background Updates** | Progress Notes (on to start with: a short line in the Nutrition report and on a product's page while scores are still being filled in); *Household:* how far Nutrition Scores, Recall Alerts and Product Photos have got, when each runs next, and Run Now (administrators). Anyone can see it; the page updates while it's open |
 | **Reset This Card** | Put this card's settings back to how they started |
 
 ---
@@ -146,6 +155,13 @@ AI Tasks have no access to your devices, so nothing in the house can be switched
 | `sensor.crow_food_soon_to_run_out` | Products at or below their minimum quantity |
 | `sensor.crow_food_not_bought_lately` | Products not bought or used for the chosen months |
 | `sensor.crow_food_consumed` | The percentage eaten rather than thrown away |
+| `sensor.crow_food_food_at_home` | What everything in storage is worth (a money sensor, so Home Assistant keeps its history) |
+| `sensor.crow_food_thrown_away_this_month` | What was thrown away since the 1st, in money (with how many things and the most thrown) |
+| `sensor.crow_food_spent_this_month` | Shopping added since the 1st with a price, in money |
+| `sensor.crow_food_to_buy` | Running low and not on a shopping list yet (with each one and how many to buy) |
+| `sensor.crow_food_next_best_before` | The date the next thing goes off, and what it is |
+| `binary_sensor.crow_food_possible_food_recall` | On while a Food Standards Agency alert matches something at home (with the products and the alerts' links) |
+| `calendar.crow_food_best_before_dates` | A calendar of what goes off on which day (one event a day for each product, with where it is and whether it's open), in Home Assistant's Calendar and for automations. Storages kept for only some people are left out |
 | `sensor.crow_food_<storage>` | One for each storage and shopping list |
 
 With **Shopping Lists as To-do Lists** on, each shopping list is also a `todo.` entity.
@@ -177,6 +193,7 @@ To stop watching products, Soon to Run Out ⋯ → **Clear Minimums**.
 | `crow_food.consume` | Uses something up, opened packets and the soonest date first (or throws it away) |
 | `crow_food.add_to_shopping_list` | Adds a product to a shopping list |
 | `crow_food.send_reminder` | Sends today's reminder now |
+| `crow_food.send_weekly_report` | Sends This Week now to the people chosen for it |
 | `crow_food.backup` | Backs everything up now |
 
 Events: `crow_food_changed` (whenever anything changes) and `crow_food_low_stock` (a product has reached its minimum quantity).

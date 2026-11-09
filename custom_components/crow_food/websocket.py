@@ -1,6 +1,7 @@
 """The websocket commands the card uses (crow_food/...)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 
@@ -140,7 +141,7 @@ async def _item_delete(food, user, msg):
 async def _consume(food, user, msg):
     status = STATUS_THROWN if msg.get("status") == "thrown" else STATUS_CONSUMED
     item = await food.async_consume(user.id, msg["item_id"], msg.get("qty"), status)
-    return {"item": item, "log_id": food.last_log_id}
+    return {"item": item, "log_id": food.last_log_id, "top_up": food.last_top_up}
 
 
 async def _move(food, user, msg):
@@ -148,7 +149,8 @@ async def _move(food, user, msg):
 
 
 async def _open(food, user, msg):
-    return await food.async_open(user.id, msg["item_id"], msg.get("opened", True))
+    row = await food.async_open(user.id, msg["item_id"], msg.get("opened", True))
+    return {**row, "top_up": food.last_top_up} if food.last_top_up else row
 
 
 async def _buy(food, user, msg):
@@ -198,6 +200,105 @@ async def _restore_products(food, user, msg):
     return {"count": await food.async_restore_products(msg["products"])}
 
 
+async def _recalls_dismiss(food, user, msg):
+    from .extras import async_dismiss_recall
+    await async_dismiss_recall(food, msg["alert_id"])
+
+
+async def _recalls_check(food, user, msg):
+    from .extras import async_recalls
+    await async_recalls(food.hass, food, notify_new=False)
+    return {"recalls": food.recalls_for(user.id), "checked": food.data.get("recalls_checked")}
+
+
+# ── Import from Grocy (administrators) ──────────────────────────────────────
+def _grocy_creds(food, msg):
+    st = food.data.get("grocy") or {}
+    return (msg.get("url") or st.get("url") or "").strip(), (msg.get("key") or st.get("key") or "").strip()
+
+
+async def _grocy_status(food, user, msg):
+    from .grocy import status
+    return status(food)
+
+
+async def _grocy_check(food, user, msg):
+    from .grocy import async_check
+    url, key = _grocy_creds(food, msg)
+    return await async_check(food.hass, url, key)
+
+
+async def _grocy_import(food, user, msg):
+    from .grocy import async_import, status
+    url, key = _grocy_creds(food, msg)
+    r = await async_import(food.hass, food, user.id, url, key, photos=msg.get("photos", True))
+    return {**r, "status": status(food)}
+
+
+async def _grocy_forget(food, user, msg):
+    """Forgets Grocy's address and key (what was imported stays, and is still known, so it isn't doubled later)."""
+    from .grocy import status
+    st = food.data.get("grocy") or {}
+    st.pop("key", None)
+    if msg.get("all"):
+        st.pop("map", None)
+    food._save()
+    return status(food)
+
+
+async def _grades_lookup(food, user, msg):
+    """A product's page opened without scores: looked up now (anyone can)."""
+    from .extras import async_grade_one
+    await async_grade_one(food.hass, food, msg["product_id"])
+    p = food.data["products"].get(msg["product_id"]) or {}
+    return {"grades": p.get("grades")}
+
+
+async def _weekly_now(food, user, msg):
+    """Send Now in the editor: This Week to the people ticked there (saved or not yet)."""
+    from . import notify
+    uids = msg.get("users")
+    if uids is None:
+        uids = (food.settings.get("notify", {}).get("weekly") or {}).get("users") or []
+    if not uids:
+        raise FoodError("nobody", "Choose who it goes to first.")
+    # how many of each person's devices it reached (someone can have the app on a phone, an iPad and a Mac)
+    per = {uid: await notify.async_weekly(food.hass, food, [uid], always=True) for uid in uids}
+    return {"sent": sum(per.values()), "people": per}
+
+
+async def _background(food, user, msg):
+    from .extras import status
+    return status(food.hass, food)
+
+
+async def _background_run(food, user, msg):
+    """Run Now (administrators): starts the job in the background and answers straight away."""
+    from .extras import JOBS, run_job, status
+    hass, job = food.hass, msg["job"]
+    if job == "photos":
+        _keeper(food).run(deadline=None, sweep=True)
+    elif job == "receipts":
+        from . import saved_receipts
+        hass.async_create_background_task(saved_receipts.async_nightly(hass, food), "crow_food receipts now")
+        await asyncio.sleep(0)
+    elif not JOBS[job]["running"]:
+        if job == "scores" and food.settings.get("openfoodfacts", True) is False:
+            raise FoodError("off", "Open Food Facts is switched off (Storages & Lists).")
+        if job == "recalls" and food.settings.get("recalls", True) is False:
+            raise FoodError("off", "Recall Alerts are switched off (Storages & Lists).")
+        hass.async_create_background_task(run_job(hass, food, job, scheduled=False), f"crow_food {job} now")
+        await asyncio.sleep(0)
+    return status(hass, food)
+
+
+async def _prices(food, user, msg):
+    from .extras import async_prices
+    p = food.product(msg["product_id"])
+    cur = food.settings.get("currency") or food.hass.config.currency or "GBP"
+    return {"prices": await async_prices(food.hass, food, p.get("barcode") or "", cur), "currency": cur}
+
+
 async def _here(food, user, msg):
     food.set_auto_path(user.id, msg["path"])
 
@@ -244,9 +345,13 @@ async def _settings_get(food, user, msg):
     out: dict[str, Any] = {"is_admin": user.is_admin, "settings": food.settings if user.is_admin else food.public_settings(),
                            "users": await food.async_users(), "counts": {
                                "products": len(food.data["products"]), "items": len(food.data["items"]),
-                               "storages": len(food.data["storages"]), "history": len(food.data["logs"])}}
+                               "storages": len(food.data["storages"]), "history": len(food.data["logs"])},
+                           # the storages this person can see (for settings that are per storage)
+                           "storage_list": [{"id": s["id"], "name": s.get("name") or "", "icon": s.get("icon") or "", "parent": s.get("parent")}
+                                            for s in sorted(food.visible_storages(user.id).values(), key=lambda s: s.get("sort", 0))
+                                            if s.get("kind") == "storage"]}
     if user.is_admin:
-        out["devices"] = [{"user_id": d["user_id"], "name": d["name"], "platform": d["platform"]} for d in mobile_devices(food.hass)]
+        out["devices"] = [{"user_id": d["user_id"], "name": d["name"], "platform": d["platform"], "available": d["available"]} for d in mobile_devices(food.hass)]
         out["backups"] = await food.async_list_backups()
         out["ai_entities"] = ai.task_entities(food.hass)
         out["ai"] = ai.capabilities(food.hass, food)
@@ -326,7 +431,29 @@ async def _profile_set(food, user, msg):
 
 
 async def _add_many(food, user, msg):
-    return await food.async_add_many(user.id, msg["items"], msg.get("shop"), msg.get("shop_name") or "")
+    return await food.async_add_many(user.id, msg["items"], msg.get("shop"), msg.get("shop_name") or "",
+                                     msg.get("receipt"), float(msg.get("receipt_total") or 0))
+
+
+# ── Saved receipts (seen and deleted by administrators; kept by whoever adds from one) ──
+async def _receipts_list(food, user, msg):
+    from . import saved_receipts
+    return saved_receipts.listing(food)
+
+
+async def _receipts_delete(food, user, msg):
+    from . import saved_receipts
+    await saved_receipts.async_delete(food.hass, food, msg["receipt_id"])
+    return saved_receipts.listing(food)
+
+
+async def _receipts_discard(food, user, msg):
+    """Read but nothing added: its files go (only one still waiting, and only by whoever sent it)."""
+    from . import saved_receipts
+    r = (food.data.get("receipts") or {}).get(msg["receipt_id"])
+    if r and r.get("pending") and (r.get("by") == user.id or user.is_admin):
+        await saved_receipts.async_delete(food.hass, food, r["id"])
+    return {}
 
 
 async def _receipt_prepare(food, user, msg):
@@ -399,6 +526,17 @@ COMMANDS = [
     _simple("product/delete_many", {vol.Required("ids"): [str]}, _delete_many),
     _simple("product/restore", {vol.Required("products"): [dict]}, _restore_products),
     _simple("here", {vol.Required("path"): str}, _here),
+    _simple("recalls/dismiss", {vol.Required("alert_id"): str}, _recalls_dismiss),
+    _simple("recalls/check", {}, _recalls_check),
+    _simple("prices", {vol.Required("product_id"): str}, _prices),
+    _simple("background", {}, _background),
+    _simple("notify/weekly_now", {vol.Optional("users"): [str]}, _weekly_now, admin=True),
+    _simple("grades/lookup", {vol.Required("product_id"): str}, _grades_lookup),
+    _simple("grocy/status", {}, _grocy_status, admin=True),
+    _simple("grocy/check", {vol.Optional("url"): str, vol.Optional("key"): str}, _grocy_check, admin=True),
+    _simple("grocy/import", {vol.Optional("url"): str, vol.Optional("key"): str, vol.Optional("photos"): bool}, _grocy_import, admin=True),
+    _simple("grocy/forget", {vol.Optional("all"): bool}, _grocy_forget, admin=True),
+    _simple("background/run", {vol.Required("job"): vol.In(("recalls", "scores", "photos", "receipts"))}, _background_run, admin=True),
     _simple("history", {vol.Optional("product_id"): vol.Any(None, str), vol.Optional("limit"): int,
                         vol.Optional("statuses"): vol.Any(None, [vol.In(("consumed", "thrown", "bought", "added", "moved", "picked"))]),
                         vol.Optional("before"): vol.Any(None, int), vol.Optional("query"): vol.Any(None, str)}, _history),
@@ -426,7 +564,11 @@ COMMANDS = [
     _simple("photos/optimise", {}, _photos_optimise, admin=True),
     _simple("profile/set", {vol.Optional("skin"): vol.Any(None, str)}, _profile_set),
     _simple("items/add_many", {vol.Required("items"): [dict], vol.Optional("shop"): vol.Any(None, str),
-                               vol.Optional("shop_name"): vol.Any(None, str)}, _add_many),
+                               vol.Optional("shop_name"): vol.Any(None, str), vol.Optional("receipt"): vol.Any(None, str),
+                               vol.Optional("receipt_total"): vol.Any(None, vol.Coerce(float))}, _add_many),
+    _simple("receipts/list", {}, _receipts_list, admin=True),
+    _simple("receipts/delete", {vol.Required("receipt_id"): str}, _receipts_delete, admin=True),
+    _simple("receipts/discard", {vol.Required("receipt_id"): str}, _receipts_discard),
     _simple("shops/cheapest", {}, _cheapest),
     _simple("health", {}, _health),
     _simple("health/ai", {}, _health_ai),

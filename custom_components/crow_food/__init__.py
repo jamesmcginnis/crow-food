@@ -28,13 +28,13 @@ from homeassistant.loader import async_get_integration
 from . import assist, notify, websocket
 from .photos import PhotoKeeper
 from .const import CARD_FILENAME, DOMAIN, KIND_LIST, KIND_STORAGE, LAZY_FILES, STATUS_CONSUMED, STATUS_THROWN
-from .http import PhotoUploadView, PhotoView
+from .http import PersonPicView, PhotoUploadView, PhotoView, ReceiptFileView, ReceiptUploadView
 from .store import CrowFood, FoodError
 
 _LOGGER = logging.getLogger(__name__)
 
 CARD_URL = f"/{DOMAIN}/{CARD_FILENAME}"
-PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.TODO]
+PLATFORMS = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.TODO, Platform.CALENDAR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 ADD_SCHEMA = vol.Schema({
@@ -112,7 +112,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.data.get(f"{DOMAIN}_views"):
         hass.http.register_view(PhotoView(hass))
+        hass.http.register_view(PersonPicView(hass))
         hass.http.register_view(PhotoUploadView(hass))
+        hass.http.register_view(ReceiptFileView(hass))
+        hass.http.register_view(ReceiptUploadView(hass))
         websocket.async_register(hass)
         hass.data[f"{DOMAIN}_views"] = True
 
@@ -138,7 +141,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         from homeassistant.helpers.event import async_call_later
 
-        entry.async_on_unload(async_call_later(hass, 90, lambda _n: hass.async_create_background_task(_recheck(), "crow_food photo recheck")))
+        # a plain function (not a lambda) marked @callback: Home Assistant runs it on its own loop; anything else
+        # is run in a worker thread, where starting a task fails
+        @callback
+        def _start_recheck(_now) -> None:
+            hass.async_create_background_task(_recheck(), "crow_food photo recheck")
+
+        entry.async_on_unload(async_call_later(hass, 90, _start_recheck))
+
+    # recall alerts every six hours, and Nutri-Score / Eco-Score filled in for products with a barcode
+    from . import extras
+    extras.start(hass, food, entry)
+    from . import saved_receipts
+    saved_receipts.start(hass, food, entry)
 
     # the day's note to the people chosen in the editor, at the time chosen there
     @callback
@@ -148,6 +163,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.async_create_task(notify.async_stale(hass, food))
             if now.month == 1 and now.day == 1:
                 hass.async_create_task(notify.async_year(hass, food))
+        # This Week, on the chosen day at the chosen time
+        wk = food.settings.get("notify", {}).get("weekly") or {}
+        if wk.get("users") and now.weekday() == int(wk.get("day", 6)) and now.strftime("%H:%M") == (wk.get("time") or "18:00"):
+            hass.async_create_task(notify.async_weekly(hass, food))
 
     entry.async_on_unload(async_track_time_change(hass, _tick, second=0))
 
@@ -221,6 +240,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await notify.async_daily(hass, food)
         await notify.async_stale(hass, food)
 
+    async def svc_weekly(call: ServiceCall) -> None:
+        await notify.async_weekly(hass, food, always=True)
+
     async def svc_backup(call: ServiceCall) -> dict:
         return {"backup": await food.async_backup()}
 
@@ -228,6 +250,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, "consume", svc_use, USE_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(DOMAIN, "add_to_shopping_list", svc_list, LIST_SCHEMA, supports_response=SupportsResponse.OPTIONAL)
     hass.services.async_register(DOMAIN, "send_reminder", svc_notify)
+    hass.services.async_register(DOMAIN, "send_weekly_report", svc_weekly)
     hass.services.async_register(DOMAIN, "backup", svc_backup, supports_response=SupportsResponse.OPTIONAL)
     return True
 
@@ -237,7 +260,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     food: CrowFood | None = hass.data.get(DOMAIN)
     if food:
         await food.async_flush()
-    for svc in ("add", "consume", "add_to_shopping_list", "send_reminder", "backup"):
+    for svc in ("add", "consume", "add_to_shopping_list", "send_reminder", "send_weekly_report", "backup"):
         hass.services.async_remove(DOMAIN, svc)
     if ok:
         hass.data.pop(DOMAIN, None)

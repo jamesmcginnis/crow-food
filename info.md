@@ -8,6 +8,10 @@ Everything is **private to your household** — products, photos and history are
 
 > **AI features are optional and off by default.** Turn on **AI Features** in the card editor to unlock them — they use the AI Task you've already set up in Home Assistant. With AI off, everything else in the card works as normal.
 
+If you enjoy Crow Food, you can support its development:
+
+<a href="https://buymeacoffee.com/jamesmcginnis"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20Me%20a%20Coffee&emoji=&slug=jamesmcginnis&button_colour=FFDD00&font_colour=000000&font_family=Inter&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me a Coffee" height="40"></a>
+
 **Step 1 — Add the repository to the Marketplace:**
 
 [![Open your Home Assistant instance and add this repository to the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=jamesmcginnis&repository=crow-food&category=integration)
@@ -24,7 +28,7 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 
 ## Key Features
 
-- **Overview** — Consumed and Thrown percentages, Smart lists, Shopping lists and Storages, each section folding away
+- **Overview** — Photos of everything in stock across the top, Consumed and Thrown percentages, Smart lists, Shopping lists and Storages, each section folding away
 - **Storages** — as many as you like, with their own colour and icon, nested up to three deep, shared with everyone or only some people
 - **Smart lists** — All, Open, Soon to be Expired, Expired, Soon to Run Out and Not Bought Lately
 - **Shopping lists** — grouped by shop with running totals, a Bought section and **Put Away**, which sends everything back to where it usually lives
@@ -37,4 +41,5 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 - **Sensors, to-do lists and actions** — for automations and Assist
 - **Classic or Glass** — light or dark, with your own accent colour
 - **Full Screen** — from the ⋯ menu, or straight away when the dashboard opens
+- **Computers and tablets** — a sidebar with your storages, lists and smart lists, and a wider Overview, when the card is wide enough; on a smaller tablet held upright the sidebar shows just its icons
 

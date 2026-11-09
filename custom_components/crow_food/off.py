@@ -78,7 +78,7 @@ async def async_lookup(food: CrowFood, code: str) -> dict | None:
     try:
         async with asyncio.timeout(12):
             resp = await session.get(URL.format(code=code), params={"fields": FIELDS},
-                                     headers={"User-Agent": "CrowFood/0.0.2 (Home Assistant integration)"})
+                                     headers={"User-Agent": "CrowFood/0.0.1 (Home Assistant integration)"})
             if resp.status == 404:
                 _cache[code] = (time.time(), None)
                 return None

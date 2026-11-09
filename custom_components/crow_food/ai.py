@@ -512,16 +512,39 @@ async def _run(hass: HomeAssistant, food: CrowFood, user, feature: str, data: di
             f"\n\nSuggest 3 simple, realistic home meals (in {lang}) that between them use up as many of the first list as "
             "possible, using what else they have and as few bought extras as possible. Reply with JSON only: "
             '{"note": "one short friendly sentence", "meals": [{"title": "...", "minutes": 25, '
-            '"uses": ["names copied exactly from the first list"], "also": ["names copied exactly from what else they have"], '
+            '"uses": ["names copied exactly from the first list, without the part in brackets"], "also": ["names copied exactly from what else they have, without the part in brackets"], '
             '"missing": ["short names of things to buy, if any"], "steps": ["3 to 5 short steps"]}]}')))
         if not isinstance(out, dict) or not isinstance(out.get("meals"), list):
             raise FoodError("ai_failed", FRIENDLY["other"])
         pool = first + rest
 
+        def norm(t: str) -> list[str]:
+            # "Harry Ramsden's Jumbo Sausages" -> harry, ramsden, jumbo, sausage (no punctuation, sizes or plurals)
+            out = []
+            for w in re.findall(r"[a-z]+", t.lower().replace("’", "").replace("'", "")):
+                if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+                    w = w[:-1]
+                if w not in ("g", "kg", "ml", "l", "x", "pack", "package", "piece", "of", "and", "the", "with"):
+                    out.append(w)
+            return out
+
         def find(name: str) -> dict:
-            n = str(name or "").strip()
+            # the name as the AI gave it, without anything it copied from the brackets ("(1.5 package, Freezer…)")
+            n = re.sub(r"\s*\(.*$", "", str(name or "")).strip() or str(name or "").strip()
             low = n.lower()
             hit = next((x for x in pool if x[0].lower() == low), None) or next((x for x in pool if low and (low in x[0].lower() or x[0].lower() in low)), None)
+            if not hit:
+                # near enough: most of the words the same, give or take an apostrophe or a plural
+                want = set(norm(n))
+                best, score = None, 0.0
+                for x in pool:
+                    have = set(norm(x[0]))
+                    if not want or not have:
+                        continue
+                    sc = len(want & have) / min(len(want), len(have))
+                    if sc > score:
+                        best, score = x, sc
+                hit = best if score >= 0.75 else None
             if not hit:
                 words = assist.query_words(n)
                 hit = next((x for x in pool if words and assist.matches(food.data["products"].get(x[1]["product"]) or {}, words)), None)

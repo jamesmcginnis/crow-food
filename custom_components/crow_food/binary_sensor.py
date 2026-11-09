@@ -1,6 +1,7 @@
 """On/off sensors for automations and dashboard badges.
 
 - Something expires today, Something has expired, Something's running low (the household's whole stock)
+- Possible food recall: on while a Food Standards Agency alert matches something at home
 
 For one product (just the milk), automations use the crow_food_running_low and crow_food_back_in_stock
 events, or the list on Something's running low. The one-sensor-per-product entities of earlier versions are
@@ -10,7 +11,7 @@ They update whenever the food changes, and just after midnight, when "today" mov
 """
 from __future__ import annotations
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
@@ -44,7 +45,7 @@ def _items_attr(food: CrowFood, items: list[dict]) -> dict:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add: AddEntitiesCallback) -> None:
     food: CrowFood = hass.data[DOMAIN]
-    add([HouseSensor(food, k) for k in HOUSE])
+    add([HouseSensor(food, k) for k in HOUSE] + [RecallSensor(food)])
     # earlier versions made a "<product> running low" sensor for every product with a minimum: taken away
     reg = er.async_get(hass)
     for ent in list(er.async_entries_for_config_entry(reg, entry.entry_id)):
@@ -103,3 +104,36 @@ class HouseSensor(_Base):
             return {"count": len(rows), "products": [r["name"] for r in rows][:100],
                     "items": [{"name": r["name"], "left": round(float(r.get("stock") or 0), 3), "minimum": r.get("min")} for r in rows][:100]}
         return _items_attr(self.food, rows)
+
+
+class RecallSensor(_Base):
+    """Possible food recall: on while a recall or allergy alert matches something at home (until it's used up,
+    thrown away or marked Not Mine). The products and the alerts' links are its attributes."""
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, food: CrowFood) -> None:
+        super().__init__(food)
+        self._attr_unique_id = f"{DOMAIN}_recall"
+        self._attr_name = "Possible food recall"
+
+    @callback
+    def _update(self, kind: str) -> None:
+        if kind in ("items", "products", "storages", "settings", "all", "day", "recalls"):
+            self.async_write_ha_state()
+
+    def _alerts(self) -> list[dict]:
+        return self.food.recalls_for(None)
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._alerts())
+
+    @property
+    def icon(self) -> str:
+        return "mdi:alert-octagon" if self.is_on else "mdi:shield-check-outline"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        alerts = self._alerts()
+        return {"products": list(dict.fromkeys(m["name"] for a in alerts for m in a.get("matches") or [])),
+                "alerts": [{"title": a.get("title"), "kind": a.get("kind"), "url": a.get("url"), "date": a.get("created")} for a in alerts][:10]}

@@ -104,19 +104,22 @@ def checks() -> list[dict]:
         from .const import DOMAIN
         hass = food.hass
         offered = any(a.id == DOMAIN for a in llm.async_get_apis(hass))
-        # which Assist agents have Crow Food ticked (Control Home Assistant), in their settings or their parts
+        # where Crow Food is turned on (Control Home Assistant): an AI's assistant settings (its options, or one of
+        # its parts, as Anthropic and OpenAI keep them) or set up with it (the MCP Server keeps it in its own data)
         agents = []
         for entry in hass.config_entries.async_entries():
-            places = [(entry.title, entry.options)] + [(sub.title, sub.data) for sub in (getattr(entry, "subentries", None) or {}).values()]
+            label = "MCP Server" if entry.domain == "mcp_server" else entry.title
+            places = [(label, entry.data), (label, entry.options)] + [(sub.title, sub.data) for sub in (getattr(entry, "subentries", None) or {}).values()]
             for title, data in places:
                 apis = data.get("llm_hass_api") if isinstance(data, dict) or hasattr(data, "get") else None
-                if apis and DOMAIN in (apis if isinstance(apis, list) else [apis]):
+                if apis and DOMAIN in (apis if isinstance(apis, (list, tuple)) else [apis]) and title not in agents:
                     agents.append(title)
         tools = ai.tools_supported()
         if not offered:
             return {"status": "warn", "note": "Crow Food’s AI tools aren’t offered to Assist (restart Home Assistant)"}
-        bits = [f"Ticked in {', '.join(agents[:3])}" if agents else
-                "Not ticked in any Assist agent yet (Settings → Voice assistants → your agent → Control Home Assistant)",
+        bits = [f"Turned on in {', '.join(agents[:3])}" if agents else
+                "Not turned on for any assistant yet: Settings → Devices & services → your AI (such as Anthropic) → "
+                "Configure → Control Home Assistant → tick Crow Food",
                 "Ask AI on the card uses the tools too" if tools else "Ask AI uses a smaller list instead (Home Assistant too old for tools in AI Tasks)",
                 "Quick phrases like “Do we have tuna?” work in Assist without AI"]
         return {"status": "ok" if agents else "warn", "note": " · ".join(bits)}
@@ -155,7 +158,7 @@ def checks() -> list[dict]:
          "on": lambda f: bool(f.settings.get("todo_lists")) or "Off", "run": todo},
         {"id": "ai", "group": GROUP_HA, "name": "AI Task",
          "on": lambda f: bool((f.settings.get("ai") or {}).get("enabled")) or "AI Features are off", "run": ai_task},
-        {"id": "assist", "group": GROUP_HA, "name": "Crow Food for Assist", "run": assist_check},
+        {"id": "assist", "group": GROUP_HA, "name": "Crow Food for Assist (voice and chat)", "run": assist_check},
         {"id": "off_barcode", **_lookup("Open Food Facts (barcodes)", "https://world.openfoodfacts.org/api/v2/product/3017620422003.json",
                                         {"fields": "product_name,image_front_url,quantity"}, ["product.product_name", "product.image_front_url"], off_on, "off_barcode")},
         {"id": "off_search", "group": GROUP_LOOKUPS, "name": "Open Food Facts (packet photos)", "run": off_search,
@@ -167,6 +170,14 @@ def checks() -> list[dict]:
         {"id": "commons", **_lookup("Wikimedia Commons (photos)", "https://commons.wikimedia.org/w/api.php",
                                     {"action": "query", "generator": "search", "gsrsearch": "filetype:bitmap cheddar", "gsrnamespace": "6", "gsrlimit": "1",
                                      "prop": "imageinfo", "iiprop": "url", "iiurlwidth": "200", "format": "json"}, ["query.pages"], photos_on, "commons")},
+        {"id": "fsa", **_lookup("Food Standards Agency (recall alerts)", "https://data.food.gov.uk/food-alerts/id",
+                                {"_limit": "1", "_sort": "-created", "_view": "full"}, ["items.0.title"],
+                                lambda f: f.settings.get("recalls", True) is not False or "Recall Alerts are off", "fsa")},
+        {"id": "open_prices", **_lookup("Open Prices (price watch)", "https://prices.openfoodfacts.org/api/v1/prices",
+                                        {"product_code": "3017620422003", "size": "1"}, ["items"],
+                                        lambda f: f.settings.get("open_prices", False) is True or "Price Watch is off (Lists & Household)", "open_prices")},
+        {"id": "off_scores", **_lookup("Open Food Facts (Nutri-Score and Eco-Score)", "https://world.openfoodfacts.org/api/v2/product/3017620422003.json",
+                                       {"fields": "nutriscore_grade,ecoscore_grade"}, ["product.nutriscore_grade"], off_on, "off_barcode")},
         {"id": "openverse", **_lookup("Openverse (photos)", "https://api.openverse.org/v1/images/", {"q": "cheddar", "page_size": "1"},
                                       ["results.0.url"], photos_on, "openverse")},
     ]

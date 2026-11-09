@@ -81,6 +81,10 @@
       "name": "Send reminder now",
       "description": "Sends today's note about expiring, expired and low food to the people chosen in the card editor."
     },
+    "send_weekly_report": {
+      "name": "Send This Week now",
+      "description": "Sends This Week (what's running low and not on a shopping list, and what's running out this week) to the people chosen for it in the card editor."
+    },
     "backup": {
       "name": "Back up now",
       "description": "Saves a copy of everything in /config/crow_food/backups."

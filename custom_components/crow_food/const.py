@@ -26,7 +26,7 @@ LAZY_FILES = {"editor": "crow-food-editor.js", "scanner": "crow-food-scanner.js"
 # A storage is a place food is kept (Pantry, Fridge, Freezer...); a list is a shopping list
 KIND_STORAGE = "storage"
 KIND_LIST = "list"
-# What a list is for: things to buy (the Shopping list), things to eat from what's at home (a meal Basket),
+# What a list is for: things to buy (the Shopping list and the Basket), things to eat from what's at home,
 # or ideas for someday. Reports go by this, not the list's name, as people use names differently.
 PURPOSE_BUY = "buy"
 PURPOSE_EAT = "eat"
@@ -59,7 +59,7 @@ DEFAULT_STORAGES = (
     {"name": "Fridge", "kind": KIND_STORAGE, "icon": "mdi:fridge-outline", "color": "#4FC9C4"},
     {"name": "Freezer", "kind": KIND_STORAGE, "icon": "mdi:snowflake", "color": "#7DB9F5"},
     {"name": "Shopping", "kind": KIND_LIST, "icon": "mdi:cart-outline", "color": "#5BC864", "purpose": "buy", "builtin": "shopping"},
-    {"name": "Basket", "kind": KIND_LIST, "icon": "mdi:basket-outline", "color": "#F0A04B", "purpose": "eat", "builtin": "basket"},
+    {"name": "Basket", "kind": KIND_LIST, "icon": "mdi:basket-outline", "color": "#F0A04B", "purpose": "buy", "builtin": "basket"},
 )
 # The lists every household has, which can't be renamed, changed or deleted (only lists people make can)
 BUILTIN_LISTS = ("shopping", "basket")
@@ -72,6 +72,12 @@ DEFAULT_SETTINGS = {
     "soon_days": 3,
     # products not bought for this many months show in Not Bought Lately (0 = off)
     "stale_months": 6,
+    # something with a minimum that's used below it goes back on the Shopping list (what's missing)
+    "top_up": True,
+    # the Food Standards Agency's recalls and allergy alerts, checked against what's at home (UK)
+    "recalls": True,
+    # what other people paid for the same barcode (Open Prices, from Open Food Facts)
+    "open_prices": False,
     # notifications: who gets them, when, and what about
     "notify": {
         "users": [],
@@ -82,6 +88,10 @@ DEFAULT_SETTINGS = {
         "bought": False,
         # a note when products reach Not Bought Lately
         "stale": True,
+        # a note when something at home may be recalled
+        "recalls": True,
+        # This Week, once a week to the people chosen for it (nobody to start with): what's low and not on a list
+        "weekly": {"users": [], "day": 6, "time": "18:00"},
         # the dashboard a note opens ("" = wherever each person last opened the card)
         "path": "",
     },
@@ -93,6 +103,8 @@ DEFAULT_SETTINGS = {
     "photo_finder": True,
     # keep a copy of everything in /config/crow_food/backups every day
     "backups": {"enabled": True, "keep": 7},
+    # receipts and order PDFs kept once something from them is added (administrators only), for this many months
+    "receipts": {"keep": True, "months": 12},
     # how long the history (consumed, thrown away, bought) is kept, in days; 0 = forever
     "history_days": 730,
     # AI (AI Task entity chosen here, or Home Assistant's preferred one)

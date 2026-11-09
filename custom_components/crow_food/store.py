@@ -24,6 +24,7 @@ import hmac
 import io
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -56,6 +57,9 @@ PHOTO_SIDE = 1200
 THUMB_SIDE = 240
 WEBP_QUALITY = 82
 
+
+POPULAR_DAYS = 90
+POPULAR_MAX = 60   # the card shows 20 of these that have photos
 
 class FoodError(Exception):
     """Something the card should show as a message (not a bug)."""
@@ -136,13 +140,20 @@ def empty_data() -> dict:
 
 
 def _ensure_builtins(data: dict) -> bool:
-    """Every household has a Shopping list and a Basket, which can't be changed or deleted. An existing list
-    with the name becomes it; otherwise it's made."""
+    """Every household has a Shopping list and a Basket (both for buying), which can't be changed or deleted.
+    An existing list with the name becomes it; otherwise it's made."""
     storages = data["storages"]
     changed = False
     for spec in DEFAULT_STORAGES:
         key = spec.get("builtin")
-        if not key or any(s.get("builtin") == key for s in storages.values()):
+        if not key:
+            continue
+        have = next((s for s in storages.values() if s.get("builtin") == key), None)
+        if have:
+            # kept to what it's for (the Basket used to be for choosing meals; it's for buying now)
+            if have.get("purpose") != spec["purpose"]:
+                have.update({"purpose": spec["purpose"], "modified": now_ms()})
+                changed = True
             continue
         lists = sorted((s for s in storages.values() if s.get("kind") == KIND_LIST and not s.get("builtin")),
                        key=lambda s: s.get("sort", 0))
@@ -167,6 +178,9 @@ class CrowFood:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
+        # told the products whose stock at home just went up (scores and recalls are checked for them straight away)
+        self.on_stock_up = None
+        self.last_top_up: dict | None = None
         self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_DATA, private=True, atomic_writes=True)
         self._settings_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_SETTINGS, private=True, atomic_writes=True)
         self._history_store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY_HISTORY, private=True, atomic_writes=True)
@@ -293,8 +307,15 @@ class CrowFood:
         s["stale_months"] = max(0, min(60, int(_num(s.get("stale_months"), 6))))
         s["history_days"] = max(0, int(_num(s.get("history_days"), 730)))
         s["backups"]["keep"] = max(1, min(60, int(_num(s["backups"].get("keep"), 7))))
+        rc = s.setdefault("receipts", {"keep": True, "months": 12})
+        rc["months"] = int(_num(rc.get("months"), 12)) if int(_num(rc.get("months"), 12)) in (0, 3, 6, 12, 24) else 12
         if not re.match(r"^\d{2}:\d{2}$", str(s["notify"].get("time") or "")):
             s["notify"]["time"] = "09:00"
+        wk = s["notify"].setdefault("weekly", {"users": [], "day": 6, "time": "18:00"})
+        wk["day"] = int(_num(wk.get("day"), 6)) % 7
+        if not re.match(r"^\d{2}:\d{2}$", str(wk.get("time") or "")):
+            wk["time"] = "18:00"
+        wk["users"] = [u for u in wk.get("users") or [] if isinstance(u, str)]
         await self._settings_store.async_save(self.settings)
         if self._trim_logs():
             self._save_history()
@@ -309,7 +330,11 @@ class CrowFood:
         return {"soon_days": self.settings.get("soon_days", 3), "currency": self.settings.get("currency") or "",
                 "stale_months": self.settings.get("stale_months", 6),
                 "openfoodfacts": self.settings.get("openfoodfacts", True), "todo_lists": bool(self.settings.get("todo_lists")),
-                "photo_finder": self.settings.get("photo_finder", True) is not False}
+                "photo_finder": self.settings.get("photo_finder", True) is not False,
+                "top_up": self.settings.get("top_up", True) is not False,
+                "recalls": self.settings.get("recalls", True) is not False,
+                "open_prices": self.settings.get("open_prices", False) is True,
+                "receipts": (self.settings.get("receipts") or {}).get("keep", True) is not False}
 
     # ── Listening cards ─────────────────────────────────────────────────────────
     @callback
@@ -331,11 +356,11 @@ class CrowFood:
             except Exception:  # noqa: BLE001 - a card that went away
                 pass
 
-    def _stock_all(self) -> dict[str, float]:
+    def _stock_all(self, for_min: bool = False) -> dict[str, float]:
         out: dict[str, float] = defaultdict(float)
         for i in self.data["items"].values():
             if (self.data["storages"].get(i.get("storage")) or {}).get("kind") == KIND_STORAGE and i.get("product"):
-                out[i["product"]] += float(i.get("qty") or 0)
+                out[i["product"]] += self._counted(i) if for_min else float(i.get("qty") or 0)
         return out
 
     def prime_watch(self) -> None:
@@ -348,6 +373,7 @@ class CrowFood:
     def _watch_low(self, now: dict[str, float]) -> None:
         """Events for automations: crow_food_running_low when a product reaches its minimum, and
         crow_food_back_in_stock when it's above it again."""
+        now = self._stock_all(for_min=True)
         low = {pid for pid, p in self.data["products"].items()
                if float(p.get("min_qty") or 0) > 0 and now.get(pid, 0) <= float(p["min_qty"]) + 1e-9}
         was = getattr(self, "_low_seen", None)
@@ -372,6 +398,12 @@ class CrowFood:
         self._stock_seen = dict(now)
         if seen is None:
             return
+        up = [pid for pid, q in now.items() if q > seen.get(pid, 0) + 1e-9]
+        if up and self.on_stock_up:
+            try:
+                self.on_stock_up(up)
+            except Exception:  # noqa: BLE001 - never in the way of saving
+                _LOGGER.debug("Crow Food: new stock check failed", exc_info=True)
         runs = self.data.setdefault("runouts", [])
         for pid in set(seen) | set(now):
             before, after = seen.get(pid, 0) > 1e-9, now.get(pid, 0) > 1e-9
@@ -392,6 +424,13 @@ class CrowFood:
             self._watch_stock()
         elif kind == "products":
             self._watch_low(self._stock_all())
+            # a barcode given (or changed) on something at home: its scores are looked up now
+            fresh = [r["id"] for r in rows or [] if r.get("barcode") and not r.get("grades") and r.get("id")]
+            if fresh and self.on_stock_up:
+                have = self._stock_all()
+                fresh = [pid for pid in fresh if have.get(pid, 0) > 0]
+                if fresh:
+                    self.on_stock_up(fresh, scores_only=True)
         self._save()
         for uid, send in list(self._subs):
             out_rows = [self.row_out(kind, r) for r in rows or [] if self._row_visible(uid, kind, r)]
@@ -575,12 +614,20 @@ class CrowFood:
             return out
         return row
 
+    def person_pic_url(self, pic: str | None) -> str | None:
+        """A person's picture as Crow Food serves it (signed, like product photos), when it's one uploaded to Home
+        Assistant (/api/image/serve/<id>/...): phones load it the same way as product photos. Anything else as it is."""
+        m = re.match(r"^/api/image/serve/([0-9a-f]{8,64})/", pic or "")
+        if not m:
+            return pic or None
+        return f"/api/{DOMAIN}/person/{m.group(1)}/{self._sig('person:' + m.group(1))}"
+
     async def async_users(self) -> list[dict]:
         people = {}
         for st in self.hass.states.async_all("person"):
             uid = st.attributes.get("user_id")
             if uid:
-                people[uid] = st.attributes.get("entity_picture")
+                people[uid] = self.person_pic_url(st.attributes.get("entity_picture"))
         out = []
         for user in await self.hass.auth.async_get_users():
             if user.system_generated or not user.is_active:
@@ -600,7 +647,26 @@ class CrowFood:
             "items": [i for i in self.data["items"].values() if i.get("storage") in storages],
             "stats": self.stats(),
             "settings": self.public_settings(),
+            "recalls": self.recalls_for(uid),
         }
+
+    def recalls_for(self, uid: str | None) -> list[dict]:
+        """Recall alerts that match something at home this person can see."""
+        vis = self.visible_storages(uid)
+        out = []
+        for a in self.data.get("recalls") or []:
+            ms = [m for m in a.get("matches") or [] if any((self.data["items"].get(i) or {}).get("storage") in vis for i in m.get("items") or [])]
+            if ms:
+                out.append({**a, "matches": ms})
+        return out
+
+    def broadcast_recalls(self) -> None:
+        async_dispatcher_send(self.hass, SIGNAL_UPDATE, "recalls")
+        for uid, send in list(self._subs):
+            try:
+                send({"type": "recalls", "recalls": self.recalls_for(uid)})
+            except Exception:  # noqa: BLE001 - a card that's gone
+                pass
 
     def stats(self, days: int = 0) -> dict:
         """How much was eaten and how much thrown away (the numbers at the top of the Overview)."""
@@ -614,9 +680,60 @@ class CrowFood:
             elif log.get("status") == STATUS_THROWN:
                 thrown += 1
         total = consumed + thrown
-        return {"consumed": consumed, "thrown": thrown,
+        # this calendar month too (the bar on the Overview)
+        first = dt_util.start_of_local_day(dt_util.now().date().replace(day=1))
+        m_since = int(first.timestamp() * 1000)
+        mc = mt = 0
+        for log in self.data["logs"]:
+            if log.get("ts", 0) < m_since:
+                continue
+            if log.get("status") == STATUS_CONSUMED:
+                mc += 1
+            elif log.get("status") == STATUS_THROWN:
+                mt += 1
+        mtot = mc + mt
+        # the most used and bought products in the last 90 days (the photos across the top of the Overview)
+        p_since = now_ms() - POPULAR_DAYS * 86400000
+        used: dict[str, int] = defaultdict(int)
+        for log in self.data["logs"]:
+            if log.get("ts", 0) < p_since:
+                continue
+            pid = log.get("product")
+            if pid and log.get("status") in (STATUS_CONSUMED, STATUS_BOUGHT, STATUS_ADDED) and pid in self.data["products"]:
+                used[pid] += 1
+        popular = sorted(used, key=lambda k: -used[k])[:POPULAR_MAX]
+        return {"consumed": consumed, "thrown": thrown, "popular": popular, "rates": self.use_rates(),
                 "consumed_pct": round(consumed * 100 / total, 1) if total else 0.0,
-                "thrown_pct": round(thrown * 100 / total, 1) if total else 0.0}
+                "thrown_pct": round(thrown * 100 / total, 1) if total else 0.0,
+                "month": {"consumed": mc, "thrown": mt,
+                          "consumed_pct": round(mc * 100 / mtot) if mtot else None,
+                          "thrown_pct": round(mt * 100 / mtot) if mtot else None}}
+
+    def use_rates(self) -> dict[str, dict]:
+        """How fast each product is used (packages a day), from the last 90 days of eating it: the card works out
+        from what's at home when it runs out, and suggests a minimum (about a week's worth). Only products used at
+        least three times, so a one-off doesn't look like a habit."""
+        since = now_ms() - 90 * 86400000
+        qty: dict[str, float] = defaultdict(float)
+        times: dict[str, int] = defaultdict(int)
+        first: dict[str, int] = {}
+        for log in self.data["logs"]:
+            ts = int(log.get("ts") or 0)
+            pid = log.get("product")
+            if ts < since or log.get("status") != STATUS_CONSUMED or pid not in self.data["products"]:
+                continue
+            qty[pid] += float(log.get("qty") or 0)
+            times[pid] += 1
+            first[pid] = min(first.get(pid, ts), ts)
+        out = {}
+        for pid, n in times.items():
+            if n < 3 or qty[pid] <= 0:
+                continue
+            # over the days since it was first eaten in that time (at least two weeks, so a burst doesn't overstate it)
+            span = max(14.0, (now_ms() - first[pid]) / 86400000)
+            rate = qty[pid] / span
+            out[pid] = {"per_day": round(rate, 4), "times": n, "suggest_min": max(1, math.ceil(rate * 7 - 1e-6))}
+        return out
 
     # ── History ─────────────────────────────────────────────────────────────────
     def _log(self, uid: str | None, status: str, item: dict, qty: float, storage: str | None = None, **extra) -> None:
@@ -754,14 +871,37 @@ class CrowFood:
                 self.data["items"][iid] = it
                 added = True
             del self.data["logs"][idx]
-            self._restored[log_id] = {"log": log, "idx": idx, "item": it["id"], "qty": qty, "added": added, "at": now_ms()}
+            off = self._undo_top_up(log)
+            self._restored[log_id] = {"log": log, "idx": idx, "item": it["id"], "qty": qty, "added": added, "at": now_ms(), "off": off}
             for key in [k for k, v in self._restored.items() if v["at"] < now_ms() - 600000]:
                 self._restored.pop(key, None)
             self._save_history()
             self._changed("items", [it])
             self.stats_changed()
             self.history_changed()
-            return {"item": self.row_out("items", it), "storage": st["id"], "storage_name": st.get("name", "")}
+            return {"item": self.row_out("items", it), "storage": st["id"], "storage_name": st.get("name", ""),
+                    "off_list": off["list_name"] if off else None}
+
+    def _undo_top_up(self, log: dict) -> dict | None:
+        """Putting back something whose use topped up the Shopping list: what went on the list comes off again
+        (all of it, or the part that was added to what was already there). Left alone when it's been ticked as
+        bought, moved, or its amount changed since."""
+        tu = log.get("top_up") or {}
+        li = self.data["items"].get(tu.get("item") or "")
+        st = self.data["storages"].get((li or {}).get("storage") or "")
+        if not li or not st or st.get("kind") != KIND_LIST or li.get("bought") or abs(float(li.get("qty") or 0) - float(tu.get("after") or -1)) > EPS:
+            return None
+        left = round(float(li["qty"]) - float(tu.get("qty") or 0), 4)
+        out = {"item": li["id"], "qty": float(tu.get("qty") or 0), "list_name": st.get("name") or "Shopping"}
+        if left <= EPS:
+            out["row"] = dict(li)
+            del self.data["items"][li["id"]]
+            self._changed("items", removed=[li["id"]])
+        else:
+            li["qty"] = left
+            li["modified"] = now_ms()
+            self._changed("items", [li])
+        return out
 
     async def async_undo_restore(self, uid: str, log_id: str) -> None:
         """Undo for Restore: takes the amount back out and puts the history entry back where it was."""
@@ -779,6 +919,16 @@ class CrowFood:
                     it["qty"] = left
                     it["modified"] = now_ms()
                     self._changed("items", [it])
+            off = info.get("off")
+            if off:
+                li = self.data["items"].get(off["item"])
+                if li:
+                    li["qty"] = round(float(li["qty"]) + off["qty"], 4)
+                    li["modified"] = now_ms()
+                    self._changed("items", [li])
+                elif off.get("row") and off["row"].get("storage") in self.data["storages"]:
+                    self.data["items"][off["item"]] = {**off["row"], "modified": now_ms()}
+                    self._changed("items", [self.data["items"][off["item"]]])
             logs = self.data["logs"]
             ts = info["log"].get("ts", 0)
             pos = len(logs)
@@ -1002,6 +1152,7 @@ class CrowFood:
             "nutrition": g("nutrition") if isinstance(g("nutrition"), dict) else None,
             "source": _str(g("source", "local"), 30),
             "no_expiry": bool(g("no_expiry", False)),
+            "open_low": bool(g("open_low", False)),
         }
 
     async def async_save_product(self, uid: str, data: dict, notify: bool = True) -> dict:
@@ -1018,6 +1169,8 @@ class CrowFood:
             await self.async_drop_photo(old["photo"])
         row = {**(old or {}), **fields, "id": pid or new_id(), "created": (old or {}).get("created") or now_ms(),
                "modified": now_ms()}
+        if old and old.get("barcode") != row.get("barcode"):
+            row.pop("grades", None)   # Nutri-Score and Eco-Score belong to the barcode: looked up again
         if old and old.get("name", "").strip().lower() != row["name"].strip().lower():
             row.pop("info", None)   # About This Food was for the old name
         if old and old.get("photo") != row.get("photo"):
@@ -1038,6 +1191,7 @@ class CrowFood:
         removed = [k for k, i in self.data["items"].items() if i.get("product") == pid]
         for k in removed:
             del self.data["items"][k]
+        self._mark_deleted(removed)
         del self.data["products"][pid]
         if p.get("photo") and not self._photo_in_use(p["photo"]):
             await self.async_drop_photo(p["photo"])
@@ -1143,12 +1297,56 @@ class CrowFood:
                 del self.data["items"][iid]
                 self._changed("items", removed=[iid])
                 self._check_low(uid, it["product"])
+                self._top_up(uid, it["product"])
                 return None
             it["qty"] = left
             it["modified"] = now_ms()
             self._changed("items", [it])
             self._check_low(uid, it["product"])
+            self._top_up(uid, it["product"])
             return it
+
+    def _top_up(self, uid: str | None, pid: str) -> None:
+        """Below its minimum after something's used or thrown away: what's missing goes on the Shopping list
+        (minus what's already on a shopping list). Two loaves minimum, one left: one loaf on Shopping."""
+        self.last_top_up = None
+        if self.settings.get("top_up", True) is False:
+            return
+        p = self.data["products"].get(pid)
+        need = float((p or {}).get("min_qty") or 0)
+        if need <= 0:
+            return
+        short = need - self.stock_for_min(pid)
+        if short <= EPS:
+            return
+        shop = next((s for s in self.data["storages"].values() if s.get("builtin") == "shopping"), None)
+        if not shop:
+            return
+        on_lists = [i for i in self.data["items"].values() if i.get("product") == pid and self.purpose(i.get("storage")) == PURPOSE_BUY]
+        short -= sum(float(i.get("qty") or 0) for i in on_lists)
+        if short <= EPS:
+            return
+        add = float(math.ceil(short - EPS))
+        mine = next((i for i in on_lists if i.get("storage") == shop["id"] and not i.get("bought")), None)
+        row = mine
+        if mine:
+            mine["qty"] = round(float(mine["qty"]) + add, 4)
+            mine["modified"] = now_ms()
+            self._changed("items", [mine])
+        else:
+            fields = self._item_fields({"product": pid, "storage": shop["id"], "qty": add, "shop": p.get("shop"),
+                                        "price": p.get("price", 0)}, None, p)
+            fields["expires"] = fields["opened"] = None
+            row = {**fields, "id": new_id(), "created": now_ms(), "modified": now_ms(), "by": uid, "auto": True}
+            self.data["items"][row["id"]] = row
+            self._changed("items", [row])
+        self.last_top_up = {"product": pid, "qty": add, "list": shop["id"], "list_name": shop.get("name") or "Shopping"}
+        # the use that caused it remembers what went on the list (and how much was there just after), so putting
+        # it back takes exactly that off again, unless the list item has been changed or bought since
+        entry = next((l for l in reversed(self.data.get("logs", [])) if l.get("id") == self.last_log_id), None)
+        if entry is not None:
+            entry["top_up"] = {"item": row["id"], "qty": add, "after": row["qty"]}
+            self._save_history()
 
     async def async_clear_min(self, ids: list[str] | None) -> int:
         """Minimum quantities back to none: the ones given, or every product's."""
@@ -1198,10 +1396,21 @@ class CrowFood:
         return sum(i["qty"] for i in self.data["items"].values() if i.get("product") == pid
                    and (self.data["storages"].get(i.get("storage")) or {}).get("kind") == KIND_STORAGE)
 
+    def _counted(self, item: dict) -> float:
+        """How much of an item counts towards its product's minimum: an opened one counts as used up when the
+        product says so (keep a spare: opening the last one is when it runs low)."""
+        if item.get("opened") and (self.data["products"].get(item.get("product")) or {}).get("open_low"):
+            return 0.0
+        return float(item.get("qty") or 0)
+
+    def stock_for_min(self, pid: str) -> float:
+        return sum(self._counted(i) for i in self.data["items"].values() if i.get("product") == pid
+                   and (self.data["storages"].get(i.get("storage")) or {}).get("kind") == KIND_STORAGE)
+
     # ── How long things keep in this house (for dates on things added from a receipt) ──
     def _is_freezer(self, sid: str | None) -> bool:
         st = self.data["storages"].get(sid or "") or {}
-        return bool(re.search(r"freez|frozen", st.get("name", ""), re.I))
+        return bool(st.get("freezer")) or bool(re.search(r"freez|frozen", st.get("name", ""), re.I))
 
     def shelf_samples(self) -> dict[str, list[tuple[date, int, bool]]]:
         """product id -> (when it was put away, days it had until its best-before, kept in a freezer), one per pack.
@@ -1290,7 +1499,8 @@ class CrowFood:
                 counts[it["storage"]] = counts.get(it["storage"], 0) + 1
         return max(counts, key=counts.get) if counts else None
 
-    async def async_add_many(self, uid: str, rows: list[dict], shop: str | None = None, shop_name: str = "") -> dict:
+    async def async_add_many(self, uid: str, rows: list[dict], shop: str | None = None, shop_name: str = "",
+                             receipt: str | None = None, receipt_total: float = 0) -> dict:
         """Adds what was read from a receipt, an order email or said out loud, once it's been checked."""
         if not shop and shop_name.strip():
             low = shop_name.strip().lower()
@@ -1319,8 +1529,14 @@ class CrowFood:
                 from . import receipts
 
                 receipts.remember(self, r["receipt_name"], row["product"])
+        if receipt:
+            # the receipt it came from, kept with what it added
+            from . import saved_receipts
+            ids = {a["id"] for a in added}
+            logs = [log["id"] for log in self.data.get("logs", [])[-(len(added) * 3 + 10):] if log.get("item") in ids and log.get("id")]
+            saved_receipts.confirm(self, receipt, shop, receipt_total, added, logs)
         self._save()
-        return {"count": len(added), "shop": shop}
+        return {"count": len(added), "shop": shop, "receipt": receipt if receipt in (self.data.get("receipts") or {}) else None}
 
     # ── Cheapest shop: what each product has cost at each shop ──────────────────────
     def shop_prices(self, pid: str) -> list[dict]:
@@ -1356,9 +1572,9 @@ class CrowFood:
 
     def _check_low(self, uid: str | None, pid: str) -> None:
         p = self.data["products"].get(pid)
-        if p and p.get("min_qty", 0) > 0 and self.stock(pid) <= p["min_qty"] + EPS:
+        if p and p.get("min_qty", 0) > 0 and self.stock_for_min(pid) <= p["min_qty"] + EPS:
             self.hass.bus.async_fire(f"{DOMAIN}_low_stock", {"product": p["name"], "product_id": pid,
-                                                             "stock": self.stock(pid), "min": p["min_qty"]})
+                                                             "stock": self.stock_for_min(pid), "min": p["min_qty"]})
 
     async def async_move(self, uid: str, iid: str, storage: str, qty: float | None = None) -> dict:
         async with self._lock:
@@ -1396,7 +1612,16 @@ class CrowFood:
             return row
 
     async def async_open(self, uid: str, iid: str, opened: bool) -> dict:
-        """Marks one package as opened (the rest stay sealed), or closes it again."""
+        """Marks one package as opened (the rest stay sealed), or closes it again. For a product where opened
+        counts as used up, opening can take it below its minimum, so Top Up Shopping runs then too."""
+        self.last_top_up = None
+        row = await self._async_open(uid, iid, opened)
+        if opened and (self.data["products"].get(row.get("product")) or {}).get("open_low"):
+            self._top_up(uid, row["product"])
+            self._check_low(uid, row["product"])
+        return row
+
+    async def _async_open(self, uid: str, iid: str, opened: bool) -> dict:
         async with self._lock:
             it = self.item(iid, uid)
             if not opened:
@@ -1471,7 +1696,6 @@ class CrowFood:
                 dest = target or storages.get(it.get("dest") or "") or storages.get(p.get("home") or "") or fallback
                 if not dest or dest.get("kind") != KIND_STORAGE:
                     continue
-                self._log(uid, STATUS_BOUGHT, it, it["qty"], shop=it.get("shop"))
                 if it.get("price"):
                     p["price"] = it["price"]
                 del self.data["items"][it["id"]]
@@ -1483,6 +1707,9 @@ class CrowFood:
                 fields = self._item_fields(new, None, p_obj or {"id": it["product"]})
                 row = {**fields, "id": new_id(), "created": now_ms(), "modified": now_ms(), "by": uid}
                 self.data["items"][row["id"]] = row
+                # logged against what's now in the storage (so deleting it, or correcting its date, finds this),
+                # but from the list it came off (what the list is for decides whether it was bought)
+                self._log(uid, STATUS_BOUGHT, {**row, "shop": it.get("shop")}, it["qty"], storage=list_id, shop=it.get("shop"), to=dest["id"])
                 self._changed("items", [row])
                 n += 1
         return n
@@ -1495,7 +1722,21 @@ class CrowFood:
                 del self.data["items"][iid]
                 removed.append(iid)
         if removed:
+            self._mark_deleted(removed)
             self._changed("items", removed=removed)
+
+    def _mark_deleted(self, ids: list[str]) -> None:
+        """Deleted, not used: their booking in is marked, so What Was Booked In leaves them out."""
+        gone = set(ids)
+        # some of it used or thrown away first: it was really here, so its booking in stands
+        gone -= {l.get("item") for l in self.data.get("logs", []) if l.get("status") in (STATUS_CONSUMED, STATUS_THROWN)}
+        hit = False
+        for log in self.data.get("logs", []):
+            if log.get("item") in gone and log.get("status") in (STATUS_ADDED, STATUS_BOUGHT):
+                log["deleted"] = True
+                hit = True
+        if hit:
+            self._save_history()
 
     # ── Smart lists (also used by the sensors and notifications) ─────────────────
     def smart(self, uid: str | None = None) -> dict[str, list[dict]]:
@@ -1507,7 +1748,7 @@ class CrowFood:
         low = []
         for p in self.data["products"].values():
             if p.get("min_qty", 0) > 0:
-                have = sum(i["qty"] for i in inv if i.get("product") == p["id"])
+                have = sum(self._counted(i) for i in inv if i.get("product") == p["id"])
                 if have <= p["min_qty"] + EPS:
                     low.append({"product": p["id"], "name": p["name"], "stock": have, "min": p["min_qty"]})
         return {
@@ -1694,6 +1935,9 @@ class CrowFood:
                                 n += 1
                             except OSError:
                                 pass
+                # saved receipts too
+                import shutil
+                shutil.rmtree(self.base / "receipts", ignore_errors=True)
                 return n
 
             removed = await self.hass.async_add_executor_job(_wipe_photos)

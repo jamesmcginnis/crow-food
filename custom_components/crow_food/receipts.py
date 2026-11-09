@@ -43,7 +43,12 @@ QTY_START = re.compile(r"^(\d{1,2})\s+(?:x\s+|×\s*)?(?:[†‡*#]\s*)?(?=[A-Za-
 # have "Total" in it (Bodyform Total Protection)
 JUNK_ITEM = re.compile(r"\b(clubcard|nectar|voucher|coupon|delivery|basket|charge|multibuy|offers?\b.*£|\d+ for £)", re.I)
 AT_LINE = re.compile(r"^\s*(\d{1,3})\s*(?:@|x|×)\s*£?\s?(\d+\.\d{2})", re.I)
-TOTAL = re.compile(r"\b(total paid|amount paid|balance due|total)\b\s*:?\s*£\s?(\d{1,5}(?:,\d{3})*\.\d{2})", re.I)
+TOTAL = re.compile(r"\b(total paid|amount paid|you paid|balance due|total)\b\s*:?\s*£\s?(\d{1,5}(?:,\d{3})*\.\d{2})", re.I)
+# orders that give each product as its name, then "£1.75 each", then "2 £3.50" (how many, and the line's total)
+EACH = re.compile(r"^£\s?(\d{1,4}\.\d{2})\s+each\b\s*(?:(\d{1,3})\b)?\s*(?:£\s?(\d{1,5}\.\d{2}))?\s*$", re.I)
+QTY_TOTAL = re.compile(r"^(\d{1,3})(?:\s+£\s?(\d{1,5}\.\d{2}))?\s*$")
+ONLY_TOTAL = re.compile(r"^£\s?(\d{1,5}\.\d{2})\s*$")
+PAGE_NO = re.compile(r"^(page\s+)?\d+\s+(of|/)\s+\d+$", re.I)
 SHOPS = ("tesco", "asda", "sainsbury's", "sainsburys", "morrisons", "aldi", "lidl", "waitrose", "co-op", "coop",
          "iceland", "ocado", "m&s", "marks & spencer", "farmfoods", "home bargains", "b&m", "costco", "spar")
 
@@ -110,7 +115,7 @@ def parse(text: str) -> dict:
     low_text = str(text or "").lower()
     # the receipt's total: "Total paid" if it says, else the last total
     totals = [(m.group(1).lower(), float(m.group(2).replace(",", ""))) for m in TOTAL.finditer(str(text or ""))]
-    paid = next((v for k, v in totals if k in ("total paid", "amount paid", "balance due")), None)
+    paid = next((v for k, v in totals if k in ("total paid", "amount paid", "you paid", "balance due")), None)
     receipt_total = paid if paid is not None else (totals[-1][1] if totals else 0.0)
     shop = ""
     best = 0
@@ -118,6 +123,8 @@ def parse(text: str) -> dict:
         n = low_text.count(s)
         if n > best:
             shop, best = s, n
+    # laid out a product at a time with "£1.75 each" lines: read that way too, and kept if it finds as much
+    each_items = _parse_each(lines) if sum(1 for l in lines if EACH.match(l)) >= 3 else []
     # online orders start each product with how many ("2 Dairylea..."); till receipts don't
     priced = [l for l in lines if l and _prices(l) and not JUNK.search(l)]
     online = sum(1 for l in lines if QTY_START.match(l) and not JUNK.search(l)) >= max(2, len(priced) * 0.4)
@@ -250,7 +257,105 @@ def parse(text: str) -> dict:
     for it in items:
         it["qty"] = max(1, int(it.get("qty") or 1))
         it["price"] = round(it["total"] / it["qty"], 2)
+    if each_items and len(each_items) >= len(items):
+        items, online = each_items, True
     return {"lines": items, "shop": shop, "receipt_total": round(receipt_total or 0.0, 2), "online": online}
+
+
+def _parse_each(lines: list[str]) -> list[dict]:
+    """An order laid out a product at a time (Iceland's emails, for one):
+        Heinz Baked Tinned Beans in Tomato Sauce 3 x      the name, perhaps over two or three lines
+        200g
+        £2.50 each                                         the price of one
+        3 £7.50                                            how many, and what they came to
+    with groups' names between ("Frozen", "Toiletries & Health"). A bundle has a total but no count
+    ("Coca-Cola 48 x 330ml / £26.00 each / £26.00") and lists what's in it under "Items you'll receive", each with
+    a count but no total. What's in it is kept (it's what goes in the cupboard), at the bundle's price, so it's
+    counted once; if the two don't add up, the bundle is kept instead."""
+    items: list[dict] = []
+    section = None
+    names: list[str] = []          # the lines since the last product: the next one's name
+    pending: dict | None = None    # a product with its price, waiting for how many
+    bundle: dict | None = None     # the last bundle
+    parts: list[dict] = []         # what's been listed in it
+    in_parts = False               # under its "Items you'll receive"
+    PARTS = re.compile(r"^(items you('|’)?ll receive|items you will receive|contents|includes|in this bundle)$", re.I)
+
+    def heading(line: str) -> bool:
+        return len(line.split()) <= 3 and not re.search(r"\d", line) and len(line) <= 32
+
+    def close_bundle() -> None:
+        nonlocal bundle, parts, in_parts
+        if bundle and parts:
+            worth = sum(p["total"] for p in parts)
+            if abs(worth - bundle["total"]) <= max(0.05, bundle["total"] * 0.02):
+                i = items.index(bundle)
+                items[i:i + 1] = parts
+        bundle, parts, in_parts = None, [], False
+
+    def finish(qty: int | None, total: float | None, is_bundle: bool = False) -> None:
+        nonlocal pending, bundle
+        it, pending = pending, None
+        if not it:
+            return
+        each = it.pop("each")
+        part = it.pop("part")
+        if qty is None:
+            qty = max(1, round(total / each)) if total and each else 1
+        it["qty"] = max(1, qty)
+        it["total"] = round(total if total is not None else each * it["qty"], 2)
+        if part:
+            parts.append(it)
+            return
+        close_bundle()
+        items.append(it)
+        if is_bundle:
+            bundle = it
+
+    for line in lines:
+        if not line or PAGE_NO.match(line) or re.match(r"^item\b.*\bqty\b", line, re.I):
+            continue
+        m = EACH.match(line)
+        if pending and not m:
+            q, t = QTY_TOTAL.match(line), ONLY_TOTAL.match(line)
+            if q:
+                finish(int(q.group(1)), float(q.group(2)) if q.group(2) else None)
+                continue
+            if t:   # a total with no count: a bundle
+                finish(None, float(t.group(1)), is_bundle=True)
+                continue
+            finish(1, None)
+        if m:
+            # the name: the lines before, less a group's name at the start
+            while len(names) >= 2 and heading(names[0]):
+                h = names.pop(0)
+                if PARTS.match(h) and bundle:
+                    in_parts = True
+                else:
+                    in_parts = False
+                    section = h
+            name = _clean_name(" ".join(names))
+            names = []
+            if len(name) < 2:
+                continue
+            pending = {"name": name, "section": section, "each": float(m.group(1)), "part": in_parts and bundle is not None}
+            if m.group(2):   # "£3.00 each 1 £3.00" all on one line
+                finish(int(m.group(2)), float(m.group(3)) if m.group(3) else None)
+            continue
+        if _section(line):
+            close_bundle()
+            section, names = line.strip().rstrip(":"), []
+            continue
+        if JUNK.search(line):
+            names = []
+            continue
+        names = (names + [line])[-3:]
+    if pending:
+        finish(1, None)
+    close_bundle()
+    for it in items:
+        it["price"] = round(it["total"] / it["qty"], 2)
+    return items
 
 
 # ── matching ────────────────────────────────────────────────────────────────────

@@ -62,6 +62,41 @@ class PhotoView(HomeAssistantView):
         })
 
 
+class PersonPicView(HomeAssistantView):
+    """GET /api/crow_food/person/{image}/{sig}: a person's picture from Home Assistant's own uploads
+    (/config/image/<id>), signed the same way as product photos."""
+
+    url = "/api/crow_food/person/{image}/{sig}"
+    name = "api:crow_food:person"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request, image: str, sig: str) -> web.StreamResponse:
+        food = _food(self.hass)
+        if not food or not re.fullmatch(r"[0-9a-f]{8,64}", image) or not food.check_sig("person:" + image, sig):
+            return web.Response(status=404)
+        folder = self.hass.config.path("image", image)
+
+        def pick() -> tuple[str | None, bytes]:
+            for name in ("512x512", "256x256", "original"):
+                path = os.path.join(folder, name)
+                if os.path.isfile(path):
+                    with open(path, "rb") as fh:
+                        head = fh.read(16)
+                    return path, head
+            return None, b""
+
+        path, head = await self.hass.async_add_executor_job(pick)
+        if not path:
+            return web.Response(status=404)
+        kind = ("image/png" if head.startswith(b"\x89PNG") else "image/gif" if head.startswith(b"GIF8")
+                else "image/webp" if head[8:12] == b"WEBP" else "image/jpeg")
+        return web.FileResponse(path, headers={"Content-Type": kind, "Cache-Control": "private, max-age=86400",
+                                               "X-Content-Type-Options": "nosniff"})
+
+
 async def _read_part(request: web.Request, field: str, limit: int, to_file: bool = False):
     """The named file from a multipart upload (into memory, or a temporary file for big ones)."""
     reader = await request.multipart()
@@ -95,6 +130,74 @@ async def _read_part(request: web.Request, field: str, limit: int, to_file: bool
 
 
 DOC_SIDE = 2200
+
+
+class ReceiptFileView(HomeAssistantView):
+    """GET /api/crow_food/receipt/{rid}/{n}/{sig}.{ext}: a saved receipt's file (signed; only administrators are
+    given the addresses)."""
+
+    url = "/api/crow_food/receipt/{rid}/{n}/{sig}"
+    name = "api:crow_food:receipt"
+    requires_auth = False
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def get(self, request: web.Request, rid: str, n: str, sig: str) -> web.StreamResponse:
+        from . import saved_receipts
+
+        food = _food(self.hass)
+        if not food or not re.fullmatch(r"[0-9a-f]{16}", rid) or not n.isdigit():
+            return web.Response(status=404)
+        sig = re.sub(r"\.[a-z]{3,4}$", "", sig)
+        if not food.check_sig(f"receipt:{rid}:{n}", sig):
+            return web.Response(status=404)
+        rec = (food.data.get("receipts") or {}).get(rid) or {}
+        f = next((x for x in rec.get("files") or [] if str(x["n"]) == n), None)
+        if not f:
+            return web.Response(status=404)
+        path = saved_receipts.folder(food) / rid / f"{n}{f['ext']}"
+        if not await self.hass.async_add_executor_job(path.is_file):
+            return web.Response(status=404)
+        return web.FileResponse(path, headers={
+            "Content-Type": saved_receipts.SERVE.get(f["ext"], "application/octet-stream"),
+            "Content-Disposition": f'inline; filename="receipt-{n}{f["ext"]}"',
+            "Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
+
+
+class ReceiptUploadView(HomeAssistantView):
+    """POST multipart with one or more 'file' parts: a receipt being read, kept for now. Answers {receipt}."""
+
+    url = "/api/crow_food/receipt_upload"
+    name = "api:crow_food:receipt_upload"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        from . import saved_receipts
+
+        food = _food(self.hass)
+        if not food:
+            return self.json_message("Crow Food is still starting.", 503)
+        files, total = [], 0
+        try:
+            reader = await request.multipart()
+            while (part := await reader.next()) is not None:
+                if part.name != "file":
+                    continue
+                buf = bytearray()
+                while chunk := await part.read_chunk(256 * 1024):
+                    total += len(chunk)
+                    if total > saved_receipts.MAX_TOTAL:
+                        raise FoodError("too_big", "That receipt is too big to keep.")
+                    buf.extend(chunk)
+                files.append((part.filename or "", part.headers.get("Content-Type", ""), bytes(buf)))
+            rid = await saved_receipts.async_upload(self.hass, food, request["hass_user"].id, files)
+        except FoodError as err:
+            return self.json_message(str(err), 400)
+        return self.json({"receipt": rid})
 
 
 class PhotoUploadView(HomeAssistantView):

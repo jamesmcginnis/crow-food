@@ -13,6 +13,10 @@ numbers. Every report also returns `rows`, a plain table for CSV and JSON export
 * expiry   - what goes out of date over the next 30 days
 * freezer  - what's been frozen longest, against how long it keeps frozen
 * people   - consumed, thrown and bought per person
+* consumed - What Was Consumed: everything used up in the period and what it was worth, for the household and each
+             person: totals, by hour (one day), day or week, by person, category, the products, and each entry
+* booked   - What Was Booked In: everything that came into storage (put away off a list, from a receipt, added by
+             hand) and its value, the same way, with shops too
 * product  - one product: use per month, buying to using, thrown, price
 * items    - what's at home (or on a list for eating) right now, filtered: a storage, category, open, out of date,
              going off between dates, how long it's been in, the freezer and what's been frozen too long
@@ -32,19 +36,21 @@ numbers. Every report also returns `rows`, a plain table for CSV and JSON export
 """
 from __future__ import annotations
 
+import math
 import re
+import time
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.util import dt as dt_util
 
-from .const import (KIND_LIST, KIND_STORAGE, PURPOSE_BUY, PURPOSE_EAT, STATUS_ADDED, STATUS_BOUGHT, STATUS_CONSUMED,
+from .const import (KIND_LIST, KIND_STORAGE, PURPOSE_BUY, PURPOSE_EAT, RESTORE_DAYS, STATUS_ADDED, STATUS_BOUGHT, STATUS_CONSUMED,
                     STATUS_MOVED, STATUS_PICKED, STATUS_THROWN)
 from .store import CrowFood, FoodError
 
 DAY = 86400000
-NAMES = ("month", "waste", "use", "spending", "habits", "meals", "stock", "expiry", "freezer", "people", "product", "drill", "items", "trips", "money", "bin", "daily", "saved", "opened", "ranout", "year", "seasons")
+NAMES = ("week", "nutrition", "month", "waste", "use", "spending", "habits", "meals", "stock", "expiry", "freezer", "people", "product", "drill", "items", "trips", "money", "bin", "daily", "saved", "opened", "ranout", "year", "seasons", "consumed", "booked")
 
 
 def _day(ts: int) -> date:
@@ -125,12 +131,19 @@ class _Ctx:
         return self.food.purpose(log.get("storage")) or PURPOSE_BUY
 
     def buys(self) -> list[dict]:
-        """Every time something came off a list for buying (not a Basket of meals, not things added by hand)."""
+        """Every time something came off a list for buying (not a list of meals, not things added by hand)."""
         return [l for l in self.logs if l.get("status") == STATUS_BOUGHT and self.purpose(l) == PURPOSE_BUY]
 
     def picks(self) -> list[dict]:
         """Every time something came off a list for eating."""
         return [l for l in self.logs if self.purpose(l) == PURPOSE_EAT and l.get("status") in (STATUS_PICKED, STATUS_BOUGHT)]
+
+    def ended(self) -> set:
+        """Items that went by being used, thrown away or bought (put away off a list): not deleted."""
+        if not hasattr(self, "_ended"):
+            self._ended = {l.get("item") for l in self.food.data.get("logs", [])
+                           if l.get("item") and l.get("status") in (STATUS_CONSUMED, STATUS_THROWN, STATUS_BOUGHT)}
+        return self._ended
 
     def items(self) -> list[dict]:
         return [i for i in self.food.data["items"].values()
@@ -252,6 +265,38 @@ def r_use(ctx: _Ctx) -> dict:
     }
 
 
+def r_nutrition(ctx: _Ctx) -> dict:
+    """What was eaten by Nutri-Score (A best to E) and Eco-Score, from Open Food Facts (products with a barcode)."""
+    used = ctx.period(STATUS_CONSUMED)
+    nutri: Counter = Counter()
+    eco: Counter = Counter()
+    by_grade: dict[str, Counter] = defaultdict(Counter)
+    for l in used:
+        g = (ctx.products.get(l.get("product") or "") or {}).get("grades") or {}
+        n, e = g.get("nutri") or "?", g.get("eco") or "?"
+        nutri[n] += 1
+        eco[e] += 1
+        by_grade[n][ctx.name(l)] += 1
+    known = sum(v for k, v in nutri.items() if k != "?")
+    order = ["a", "b", "c", "d", "e"]
+    mostly = max(order, key=lambda k: (nutri[k], -order.index(k))) if known else None
+    score = round(sum((5 - order.index(k)) * nutri[k] for k in order) / known, 2) if known else None
+    # how far the background fill has got (products with a barcode that Open Food Facts has been asked about)
+    coded = [p for p in ctx.products.values() if re.fullmatch(r"\d{8,14}", p.get("barcode") or "")]
+    fill = {"total": len(coded), "checked": sum(1 for p in coded if p.get("grades")),
+            "on": ctx.food.settings.get("openfoodfacts", True) is not False}
+    return {
+        "count": len(used), "known": known, "mostly": mostly, "score": score, "fill": fill,
+        "eco_known": sum(v for k, v in eco.items() if k != "?"),
+        "nutri": [{"grade": k, "count": nutri[k]} for k in order], "eco": [{"grade": k, "count": eco[k]} for k in order],
+        "unknown": nutri["?"],
+        "top": {k: _top(by_grade[k], 8) for k in order + ["?"] if by_grade[k]},
+        "rows": [{"date": _day(l["ts"]).isoformat(), "product": ctx.name(l),
+                  "nutri_score": ((ctx.products.get(l.get("product") or "") or {}).get("grades") or {}).get("nutri") or "",
+                  "eco_score": ((ctx.products.get(l.get("product") or "") or {}).get("grades") or {}).get("eco") or ""} for l in used],
+    }
+
+
 def r_spending(ctx: _Ctx) -> dict:
     bought = [{**l, "status": STATUS_BOUGHT} for l in ctx.period(STATUS_BOUGHT, STATUS_ADDED) if ctx.is_purchase(l)]
     shops = ctx.food.data["shops"]
@@ -301,7 +346,7 @@ def _every(ds: list[date]) -> float | None:
 
 def r_habits(ctx: _Ctx) -> dict:
     # Only what was bought from a list for buying: each Put Away is a purchase (once a day). Things eaten from
-    # a Basket, or added by hand, aren't shopping.
+    # a list for eating, or added by hand, aren't shopping.
     out = []
     for pid, ds in _days_of(ctx.buys()).items():
         if pid not in ctx.products:
@@ -725,6 +770,58 @@ def _median(vals: list[float]) -> float | None:
 OPEN_BANDS = [("1–2 days", 0, 2), ("3–7 days", 3, 7), ("1–2 weeks", 8, 14), ("2–4 weeks", 15, 28), ("Over a month", 29, 10 ** 6)]
 
 
+def r_week(ctx: _Ctx) -> dict:
+    """This Week: what's running low and isn't on a shopping list yet, what's likely to run out in the next 7 days
+    (from how fast it's used), and how much is on the shopping lists already."""
+    food = ctx.food
+    inv = ctx.items()
+    have: dict[str, float] = defaultdict(float)
+    for it in inv:
+        if it.get("product"):
+            have[it["product"]] += food._counted(it)
+    listed: dict[str, float] = defaultdict(float)
+    for it in food.data["items"].values():
+        st = ctx.visible.get(it.get("storage")) or {}
+        if st.get("kind") == KIND_LIST and food.purpose(it.get("storage")) == PURPOSE_BUY and not it.get("bought") and it.get("product"):
+            listed[it["product"]] += float(it.get("qty") or 0)
+    shops = food.data["shops"]
+
+    def row(pid: str, p: dict, need: float, **extra) -> dict:
+        price = float(p.get("price") or 0)
+        return {"product": pid, "name": p.get("name") or "Product", "left": round(have.get(pid, 0), 3), "min": float(p.get("min_qty") or 0),
+                "need": need, "unit": p.get("unit") or "package", "price": price, "cost": round(price * need, 2),
+                "shop": (shops.get(p.get("shop") or "") or {}).get("name") or "", "category": ctx.cat(pid), **extra}
+
+    low, soon = [], []
+    for pid, p in ctx.products.items():
+        mn = float(p.get("min_qty") or 0)
+        if mn <= 0 or have.get(pid, 0) > mn + 1e-9:
+            continue
+        need = max(1, math.ceil(mn - have.get(pid, 0) - 1e-9))
+        if listed.get(pid, 0) >= need - 1e-9:
+            continue
+        low.append(row(pid, p, need - (math.floor(listed.get(pid, 0)) if listed.get(pid) else 0)))
+    in_low = {r["product"] for r in low}
+    rates = food.use_rates()
+    for pid, rt in rates.items():
+        p = ctx.products.get(pid)
+        if not p or pid in in_low or listed.get(pid, 0) > 0 or have.get(pid, 0) <= 0 or rt["per_day"] <= 0:
+            continue
+        days = have[pid] / rt["per_day"]
+        if days <= 7:
+            soon.append(row(pid, p, max(1, math.ceil(rt["per_day"] * 7 - have[pid] - 1e-9)), days=round(days, 1)))
+    low.sort(key=lambda r: (r["left"] > 0, r["category"], r["name"].lower()))
+    soon.sort(key=lambda r: r["days"])
+    cats, by_shop = Counter(), Counter()
+    for r in low + soon:
+        cats[r["category"]] += 1
+        by_shop[r["shop"] or "No shop"] += 1
+    on_list = [ctx.products[pid]["name"] for pid in listed if pid in ctx.products]
+    return {"count": len(low) + len(soon), "low": low, "soon": soon, "cost": round(sum(r["cost"] for r in low + soon), 2),
+            "priced": sum(1 for r in low + soon if r["price"] > 0), "listed": {"count": len(on_list), "names": sorted(on_list, key=str.lower)[:40]},
+            "by_category": _top(cats, 12), "by_shop": _top(by_shop, 8)}
+
+
 def r_opened(ctx: _Ctx) -> dict:
     """Open Too Long: from opening to finished (or thrown away)."""
     per: dict[str, dict] = {}
@@ -932,6 +1029,177 @@ def r_people(ctx: _Ctx, names: dict[str, str]) -> dict:
     return {"people": people, "rows": [{k: p[k] for k in ("name", "consumed", "thrown", "bought")} for p in people]}
 
 
+def _booked(ctx: _Ctx, l: dict) -> bool:
+    """Booked in: came into a storage. Put away off a list for buying (logged as bought), or added straight to a
+    storage (a receipt, by hand). Added to a shopping list isn't: it hasn't arrived yet. Nor is anything deleted
+    since (a mistake, a receipt read wrong), or a product that's been deleted."""
+    st = l.get("status")
+    if l.get("deleted") or l.get("product") not in ctx.products:
+        return False
+    if st == STATUS_BOUGHT:
+        return ctx.purpose(l) == PURPOSE_BUY
+    if st != STATUS_ADDED:
+        return False
+    where = ctx.food.data["storages"].get(l.get("storage") or "")
+    if where and where.get("kind") != KIND_STORAGE:   # a storage deleted since still counts
+        return False
+    # deleted before deletions were marked: the item's gone, and it was never used, thrown away or bought
+    iid = l.get("item")
+    return not iid or iid in ctx.food.data["items"] or iid in ctx.ended()
+
+
+ENTRIES_MAX = 400   # the newest entries listed (the totals and graphs count them all)
+
+
+def r_flow(ctx: _Ctx, names: dict[str, str], kind: str) -> dict:
+    """What Was Consumed (kind "consumed") or What Was Booked In ("booked") over the period, for the household and
+    for each person. Everything is split by person (user id, "imported" when who did it wasn't recorded) so the
+    card can show one person without asking again."""
+    shops = ctx.food.data["shops"]
+    if kind == "consumed":
+        logs = [l for l in ctx.logs if l.get("status") == STATUS_CONSUMED and ctx.in_period(l) and l.get("product") in ctx.products]
+    else:
+        logs = [l for l in ctx.logs if l.get("status") in (STATUS_ADDED, STATUS_BOUGHT) and ctx.in_period(l) and _booked(ctx, l)]
+    logs.sort(key=lambda l: -int(l.get("ts") or 0))
+    who = lambda l: l.get("user") or "imported"  # noqa: E731
+    start, end = (ctx.since, ctx.end) if ctx.since else (min((_day(int(l["ts"])) for l in logs), default=ctx.today), ctx.end)
+    span = (end - start).days + 1
+    bucket = "hour" if span <= 1 else "day" if span <= 62 else "week"
+
+    def key_of(l: dict) -> str:
+        t = dt_util.as_local(datetime.fromtimestamp(int(l.get("ts") or 0) / 1000, dt_util.UTC))
+        if bucket == "hour":
+            return str(t.hour)
+        d = t.date()
+        return (d if bucket == "day" else _monday(d)).isoformat()
+
+    # every bucket across the period, so the graph has no gaps
+    if bucket == "hour":
+        keys = [str(h) for h in range(24)]
+    elif bucket == "day":
+        keys = [(start + timedelta(days=i)).isoformat() for i in range(span)]
+    else:
+        keys, w = [], _monday(start)
+        while w <= end:
+            keys.append(w.isoformat())
+            w += timedelta(days=7)
+
+    def blank() -> dict:
+        return {"value": 0.0, "count": 0, "qty": 0.0, "users": defaultdict(lambda: [0.0, 0])}
+
+    series = {k: blank() for k in keys}
+    people: dict[str, list] = defaultdict(lambda: [0.0, 0])
+    cats: dict[str, dict] = defaultdict(blank)
+    shop_rows: dict[str, dict] = defaultdict(blank)
+    prods: dict[str, dict] = {}
+    total_v, total_n = 0.0, 0
+
+    def add(row: dict, u: str, v: float, qty: float) -> None:
+        row["value"] += v
+        row["count"] += 1
+        row["qty"] += qty
+        row["users"][u][0] += v
+        row["users"][u][1] += 1
+
+    for l in logs:
+        u, v, qty = who(l), ctx.val(l), float(l.get("qty") or 0)
+        total_v += v
+        total_n += 1
+        people[u][0] += v
+        people[u][1] += 1
+        k = key_of(l)
+        if k in series:
+            add(series[k], u, v, qty)
+        add(cats[ctx.cat(l.get("product"))], u, v, qty)
+        if kind == "booked":
+            add(shop_rows[(shops.get(l.get("shop") or "") or {}).get("name") or "Without a shop"], u, v, qty)
+        pk = l.get("product") or f"name:{ctx.name(l)}"
+        if pk not in prods:
+            prods[pk] = {**blank(), "product": l.get("product") if l.get("product") in ctx.products else None, "name": ctx.name(l),
+                         "unit": l.get("unit") or "package"}
+        add(prods[pk], u, v, qty)
+
+    def out(row: dict) -> dict:
+        return {"value": round(row["value"], 2), "count": row["count"], "qty": round(row["qty"], 3),
+                "users": {u: [round(x[0], 2), x[1]] for u, x in row["users"].items()}}
+
+    def ranked(rows: dict, n: int | None = None) -> list[dict]:
+        items = sorted(({"name": k, **out(r)} for k, r in rows.items()), key=lambda x: (-x["value"], -x["count"], x["name"]))
+        return items[:n] if n else items
+
+    def where(l: dict) -> str:
+        """Where it went: the storage it was put away in, or (before that was kept) the list it came off."""
+        if l.get("to"):
+            return ctx.storage(l["to"])
+        st = ctx.food.data["storages"].get(l.get("storage") or "")
+        return f"off {st['name']}" if st and st.get("kind") == KIND_LIST else ctx.storage(l.get("storage"))
+
+    stamp = lambda l: dt_util.as_local(datetime.fromtimestamp(int(l.get("ts") or 0) / 1000, dt_util.UTC))  # noqa: E731
+    entry = lambda l: {"ts": int(l.get("ts") or 0), "day": stamp(l).date().isoformat(), "time": stamp(l).strftime("%H:%M"),  # noqa: E731
+                       "product": l.get("product") if l.get("product") in ctx.products else None, "name": ctx.name(l),
+                       "qty": round(float(l.get("qty") or 0), 3), "unit": l.get("unit") or "package", "value": ctx.val(l),
+                       "user": who(l), "storage": where(l),
+                       **({"shop": (shops.get(l.get("shop") or "") or {}).get("name") or ""} if kind == "booked" else {})}
+    entries = [entry(l) for l in logs]
+    users = sorted(people, key=lambda u: -people[u][0])
+    prev = _flow_prev(ctx, kind, start, end) if ctx.since else None
+    return {"kind": kind, "bucket": bucket, "value": round(total_v, 2), "count": total_n, "prev": prev,
+            "names": {u: ("Not recorded" if u == "imported" else names.get(u, "Someone")) for u in users},
+            "people": [{"user": u, "value": round(people[u][0], 2), "count": people[u][1]} for u in users],
+            "series": [{"key": k, **out(series[k])} for k in keys],
+            "categories": ranked(cats),
+            "shops": ranked(shop_rows) if kind == "booked" else [],
+            "products": sorted(({"key": k, "product": r["product"], "name": r["name"], "unit": r["unit"], **out(r)} for k, r in prods.items()),
+                               key=lambda x: (-x["value"], -x["count"], x["name"]))[:150],
+            "entries": entries[:ENTRIES_MAX], "more": max(0, len(entries) - ENTRIES_MAX),
+            "rows": [{"date": e["day"], "time": e["time"], "product": e["name"], "quantity": e["qty"], "unit": e["unit"], "value": e["value"],
+                      "person": "Not recorded" if e["user"] == "imported" else names.get(e["user"], "Someone"), "storage": e["storage"],
+                      **({"shop": e["shop"]} if kind == "booked" else {})} for e in entries]}
+
+
+def _month_end(d: date) -> date:
+    return (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+
+def _flow_prev(ctx: _Ctx, kind: str, start: date, end: date) -> dict:
+    """The period before, to compare with: the day before; the week or month before (only as far into it as this one
+    has got, while this one isn't over); or the same number of days before."""
+    span = (end - start).days + 1
+    unit, full = "days", span
+    if span == 1:
+        unit, p_start = "day", start - timedelta(days=1)
+    elif start.weekday() == 0 and span <= 7:
+        unit, full, p_start = "week", 7, start - timedelta(days=7)
+    elif start.day == 1 and end.month == start.month and end.year == start.year:
+        unit, full = "month", _month_end(start).day
+        p_start = (start - timedelta(days=1)).replace(day=1)
+    else:
+        p_start = start - timedelta(days=span)
+    p_end = p_start + timedelta(days=span - 1)
+    if unit == "month":   # a whole month against the whole month before; part of one against as far into it
+        p_end = _month_end(p_start) if span >= full else min(p_end, _month_end(p_start))
+    shops_ok = kind == "booked"
+    users: dict[str, list] = defaultdict(lambda: [0.0, 0])
+    value, count = 0.0, 0
+    for l in ctx.logs:
+        d = _day(int(l.get("ts") or 0))
+        if d < p_start or d > p_end:
+            continue
+        if kind == "consumed":
+            if l.get("status") != STATUS_CONSUMED or l.get("product") not in ctx.products:
+                continue
+        elif not (l.get("status") in (STATUS_ADDED, STATUS_BOUGHT) and shops_ok and _booked(ctx, l)):
+            continue
+        v = ctx.val(l)
+        value += v
+        count += 1
+        u = users[l.get("user") or "imported"]
+        u[0] += v
+        u[1] += 1
+    return {"since": p_start.isoformat(), "until": p_end.isoformat(), "unit": unit, "partial": span < full,
+            "value": round(value, 2), "count": count, "users": {u: [round(x[0], 2), x[1]] for u, x in users.items()}}
+
+
 def r_drill(ctx: _Ctx, f: dict, names: dict[str, str]) -> dict:
     """The details behind a tapped bar, row or tile. Filters (all optional): statuses, product (id), user (id or
     "imported"), person (a name, as reports show it), category, storage and shop (names), since and until (dates)."""
@@ -987,6 +1255,10 @@ def r_drill(ctx: _Ctx, f: dict, names: dict[str, str]) -> dict:
             return False
         if f.get("opened") and not (l.get("snap") or {}).get("opened"):
             return False
+        if f.get("booked") and not _booked(ctx, l):
+            return False
+        if f.get("known") and l.get("product") not in ctx.products:
+            return False   # a product deleted since
         return True
 
     logs = sorted(({**l, "status": STATUS_BOUGHT} if l.get("status") == STATUS_ADDED and buying and ctx.is_purchase(l) and STATUS_ADDED not in (f.get("statuses") or []) else l
@@ -1015,11 +1287,21 @@ def r_drill(ctx: _Ctx, f: dict, names: dict[str, str]) -> dict:
         if l.get("product") in ctx.products:
             pid_of.setdefault(n, l["product"])
 
+    restore_from = (time.time() - RESTORE_DAYS * 86400) * 1000
+
     def entry(l: dict) -> dict:
-        return {"ts": l.get("ts"), "date": _day(int(l["ts"])).isoformat(), "status": l["status"], "name": ctx.name(l),
-                "product": l.get("product") if l.get("product") in ctx.products else None,
-                "qty": l.get("qty"), "unit": l.get("unit"), "storage": ctx.storage(l.get("storage")), "person": who(l),
-                "shop": shop_name(l) if l["status"] == STATUS_BOUGHT and l.get("shop") else "", "value": _value(l)}
+        p = ctx.products.get(l.get("product") or "")
+        snap = l.get("snap") or {}
+        # the pack's size, so "0.1 packages" can say "1 slice"
+        content = snap.get("content") or (p or {}).get("content") or 0
+        cu = snap.get("content_unit") if snap.get("content") else (p or {}).get("content_unit") or ""
+        return {"id": l.get("id"), "ts": l.get("ts"), "date": _day(int(l["ts"])).isoformat(), "status": l["status"], "name": ctx.name(l),
+                "product": l.get("product") if p else None,
+                "qty": l.get("qty"), "unit": l.get("unit"), "content": content, "content_unit": cu,
+                "storage": ctx.storage(l.get("storage")), "storage_id": l.get("storage"), "person": who(l),
+                "shop": shop_name(l) if l["status"] == STATUS_BOUGHT and l.get("shop") else "", "value": _value(l),
+                # can be put back (used or thrown in the last RESTORE_DAYS days, and the product's still there)
+                "can_restore": bool(p and l["status"] in (STATUS_CONSUMED, STATUS_THROWN) and int(l.get("ts") or 0) >= restore_from)}
 
     # each month too (for long spans), up to two years, oldest first
     months: dict[str, dict] = {}
@@ -1129,7 +1411,7 @@ async def async_report(food: CrowFood, user, name: str, days: int | None = None,
                        until: str | None = None, year: int | None = None) -> dict:
     if name not in NAMES:
         raise FoodError("bad", "Unknown report.")
-    timeless = name in ("month", "habits", "meals", "items", "stock", "expiry", "freezer", "product", "year", "seasons")
+    timeless = name in ("month", "habits", "meals", "items", "stock", "expiry", "freezer", "product", "year", "seasons", "week")
     # chosen dates (this month, last year, from–to) instead of the last N days
     d_since, d_until = (None, None) if timeless else (_iso(since), _iso(until))
     if d_since and d_until and d_until < d_since:
@@ -1137,15 +1419,16 @@ async def async_report(food: CrowFood, user, name: str, days: int | None = None,
     ctx = _Ctx(food, user.id, None if timeless else days, d_since, d_until)
     if name == "month":
         out = r_month(ctx, month)
-    elif name in ("waste", "people", "drill"):
+    elif name in ("waste", "people", "drill", "consumed", "booked"):
         names = {u["id"]: u["name"] for u in await food.async_users()}
-        out = r_waste(ctx, names) if name == "waste" else r_people(ctx, names) if name == "people" else r_drill(ctx, filt or {}, names)
+        out = (r_waste(ctx, names) if name == "waste" else r_people(ctx, names) if name == "people"
+               else r_flow(ctx, names, name) if name in ("consumed", "booked") else r_drill(ctx, filt or {}, names))
     elif name == "items":
         out = r_items(ctx, filt or {})
     else:
         out = {"saved": r_saved, "opened": r_opened, "ranout": r_ranout, "seasons": r_seasons, "year": lambda c: r_year(c, year),
-               "money": r_money, "bin": r_bin, "daily": r_daily, "trips": r_trips, "use": r_use, "spending": r_spending, "habits": r_habits, "meals": r_meals, "stock": r_stock, "expiry": r_expiry,
-               "freezer": r_freezer}.get(name, lambda c: None)(ctx) if name != "product" else r_product(ctx, product_id)
+               "money": r_money, "nutrition": r_nutrition, "bin": r_bin, "daily": r_daily, "trips": r_trips, "use": r_use, "spending": r_spending, "habits": r_habits, "meals": r_meals, "stock": r_stock, "expiry": r_expiry,
+               "freezer": r_freezer, "week": r_week}.get(name, lambda c: None)(ctx) if name != "product" else r_product(ctx, product_id)
     out["report"] = name
     out["period_days"] = None if d_since else days
     if d_since:
