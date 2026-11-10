@@ -10,9 +10,9 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
-from . import ai, info, off, reports
+from . import ai, info, lookup, off, reports
 from .const import DOMAIN, STATUS_CONSUMED, STATUS_THROWN
-from .store import CrowFood, FoodError
+from .store import CrowFood, FoodError, now_ms
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -325,6 +325,17 @@ async def _min_qty(food, user, msg):
     return food.row_out("products", await food.async_save_product(user.id, {**p, "min_qty": msg["min_qty"]}))
 
 
+async def _week_skip(food, user, msg):
+    """Not needed this week: left out of This Week's Running Out until it's next bought or added."""
+    p = food.product(msg["product_id"])
+    if msg.get("skip", True):
+        p["week_skip"] = now_ms()
+    else:
+        p.pop("week_skip", None)
+    food._changed("products", [p])
+    return {"ok": True}
+
+
 async def _csv_import(food, user, msg):
     return {"count": await food.async_import_csv(user.id, msg["csv"], msg.get("storage_id"))}
 
@@ -349,7 +360,12 @@ async def _settings_get(food, user, msg):
                            # the storages this person can see (for settings that are per storage)
                            "storage_list": [{"id": s["id"], "name": s.get("name") or "", "icon": s.get("icon") or "", "parent": s.get("parent")}
                                             for s in sorted(food.visible_storages(user.id).values(), key=lambda s: s.get("sort", 0))
-                                            if s.get("kind") == "storage"]}
+                                            if s.get("kind") == "storage"],
+                           # and the lists (for the Suggestions strip on each list's page)
+                           "list_list": [{"id": s["id"], "name": s.get("name") or "", "icon": s.get("icon") or "", "builtin": s.get("builtin"),
+                                          "purpose": food.purpose(s["id"])}
+                                         for s in sorted(food.visible_storages(user.id).values(), key=lambda s: s.get("sort", 0))
+                                         if s.get("kind") == "list"]}
     if user.is_admin:
         out["devices"] = [{"user_id": d["user_id"], "name": d["name"], "platform": d["platform"], "available": d["available"]} for d in mobile_devices(food.hass)]
         out["backups"] = await food.async_list_backups()
@@ -373,7 +389,8 @@ async def _restore(food, user, msg):
 
 async def _report(food, user, msg):
     return await reports.async_report(food, user, msg["name"], msg.get("days"), msg.get("month"), msg.get("product_id"),
-                                      msg.get("filter"), msg.get("since"), msg.get("until"), msg.get("year"))
+                                      msg.get("filter"), msg.get("since"), msg.get("until"), msg.get("year"),
+                                      msg.get("unit"))
 
 
 async def _ai_clear(food, user, msg):
@@ -383,6 +400,22 @@ async def _ai_clear(food, user, msg):
 
 async def _info(food, user, msg):
     return {"info": await info.async_info(food.hass, food, msg["product_id"], bool(msg.get("refresh")))}
+
+
+async def _lookup_food(food, user, msg):
+    return {"info": await lookup.async_lookup(food.hass, food, msg["name"], bool(msg.get("refresh")))}
+
+
+async def _lookup_ideas(food, user, msg):
+    return {"ideas": await lookup.async_ideas(food.hass, food, msg["name"], msg["kind"])}
+
+
+async def _lookup_barcode(food, user, msg):
+    return await lookup.async_barcode(food.hass, food, msg["code"])
+
+
+async def _lookup_photo(food, user, msg):
+    return await lookup.async_photo(food.hass, food, msg["photo"])
 
 
 async def _ideas(food, user, msg):
@@ -439,6 +472,11 @@ async def _add_many(food, user, msg):
 async def _receipts_list(food, user, msg):
     from . import saved_receipts
     return saved_receipts.listing(food)
+
+
+async def _receipts_for(food, user, msg):
+    from . import saved_receipts
+    return saved_receipts.for_product(food, msg["product_id"])
 
 
 async def _receipts_delete(food, user, msg):
@@ -506,6 +544,7 @@ COMMANDS = [
     _simple("product/save", {vol.Required("product"): dict}, _product_save),
     _simple("product/delete", {vol.Required("product_id"): str}, _product_delete),
     _simple("product/min_qty", {vol.Required("product_id"): str, vol.Required("min_qty"): vol.Coerce(float)}, _min_qty),
+    _simple("product/week_skip", {vol.Required("product_id"): str, vol.Optional("skip"): bool}, _week_skip),
     _simple("lookup", {vol.Required("barcode"): str}, _lookup),
     _simple("item/save", {vol.Required("item"): dict}, _item_save),
     _simple("item/delete", {vol.Required("ids"): [str]}, _item_delete),
@@ -555,9 +594,14 @@ COMMANDS = [
     _simple("report", {vol.Required("name"): vol.In(reports.NAMES), vol.Optional("days"): vol.Any(None, vol.All(int, vol.Range(min=1, max=800))),
                        vol.Optional("month"): vol.Any(None, str), vol.Optional("product_id"): vol.Any(None, str),
                        vol.Optional("filter"): vol.Any(None, dict), vol.Optional("since"): vol.Any(None, str),
-                       vol.Optional("until"): vol.Any(None, str), vol.Optional("year"): vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=2000, max=2100)))}, _report),
+                       vol.Optional("until"): vol.Any(None, str), vol.Optional("year"): vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=2000, max=2100))),
+                       vol.Optional("unit"): vol.Any(None, vol.In(("day", "week", "month", "year")))}, _report),
     _simple("info/get", {vol.Required("product_id"): str, vol.Optional("refresh"): bool}, _info),
     _simple("info/ideas", {vol.Required("product_id"): str, vol.Required("kind"): vol.In(("serving", "cooking"))}, _ideas),
+    _simple("lookup/food", {vol.Required("name"): vol.All(str, vol.Length(min=1, max=120)), vol.Optional("refresh"): bool}, _lookup_food),
+    _simple("lookup/ideas", {vol.Required("name"): vol.All(str, vol.Length(min=1, max=120)), vol.Required("kind"): vol.In(("serving", "cooking"))}, _lookup_ideas),
+    _simple("lookup/barcode", {vol.Required("code"): vol.All(str, vol.Length(min=8, max=20))}, _lookup_barcode),
+    _simple("lookup/photo", {vol.Required("photo"): str}, _lookup_photo),
     _simple("photo/find", {vol.Optional("name"): vol.Any(None, str), vol.Optional("product_id"): vol.Any(None, str)}, _photo_find),
     _simple("photo/discard", {vol.Required("photo"): str}, _photo_discard),
     _simple("photos/stats", {}, _photos_stats, admin=True),
@@ -567,6 +611,7 @@ COMMANDS = [
                                vol.Optional("shop_name"): vol.Any(None, str), vol.Optional("receipt"): vol.Any(None, str),
                                vol.Optional("receipt_total"): vol.Any(None, vol.Coerce(float))}, _add_many),
     _simple("receipts/list", {}, _receipts_list, admin=True),
+    _simple("receipts/for_product", {vol.Required("product_id"): str}, _receipts_for, admin=True),
     _simple("receipts/delete", {vol.Required("receipt_id"): str}, _receipts_delete, admin=True),
     _simple("receipts/discard", {vol.Required("receipt_id"): str}, _receipts_discard),
     _simple("shops/cheapest", {}, _cheapest),

@@ -805,7 +805,8 @@ def r_week(ctx: _Ctx) -> dict:
     rates = food.use_rates()
     for pid, rt in rates.items():
         p = ctx.products.get(pid)
-        if not p or pid in in_low or listed.get(pid, 0) > 0 or have.get(pid, 0) <= 0 or rt["per_day"] <= 0:
+        # Not Needed (until it's next bought or added)
+        if not p or p.get("week_skip") or pid in in_low or listed.get(pid, 0) > 0 or have.get(pid, 0) <= 0 or rt["per_day"] <= 0:
             continue
         days = have[pid] / rt["per_day"]
         if days <= 7:
@@ -1135,11 +1136,20 @@ def r_flow(ctx: _Ctx, names: dict[str, str], kind: str) -> dict:
         return f"off {st['name']}" if st and st.get("kind") == KIND_LIST else ctx.storage(l.get("storage"))
 
     stamp = lambda l: dt_util.as_local(datetime.fromtimestamp(int(l.get("ts") or 0) / 1000, dt_util.UTC))  # noqa: E731
-    entry = lambda l: {"ts": int(l.get("ts") or 0), "day": stamp(l).date().isoformat(), "time": stamp(l).strftime("%H:%M"),  # noqa: E731
-                       "product": l.get("product") if l.get("product") in ctx.products else None, "name": ctx.name(l),
-                       "qty": round(float(l.get("qty") or 0), 3), "unit": l.get("unit") or "package", "value": ctx.val(l),
-                       "user": who(l), "storage": where(l),
-                       **({"shop": (shops.get(l.get("shop") or "") or {}).get("name") or ""} if kind == "booked" else {})}
+    restore_from = (time.time() - RESTORE_DAYS * 86400) * 1000
+
+    def entry(l: dict) -> dict:
+        p = ctx.products.get(l.get("product") or "")
+        snap = l.get("snap") or {}
+        return {"id": l.get("id"), "status": l.get("status"), "ts": int(l.get("ts") or 0), "day": stamp(l).date().isoformat(), "time": stamp(l).strftime("%H:%M"),
+                "product": l.get("product") if p else None, "name": ctx.name(l),
+                "qty": round(float(l.get("qty") or 0), 3), "unit": l.get("unit") or "package", "value": ctx.val(l),
+                "content": snap.get("content") or (p or {}).get("content") or 0,
+                "content_unit": snap.get("content_unit") if snap.get("content") else (p or {}).get("content_unit") or "",
+                "user": who(l), "storage": where(l), "storage_id": l.get("storage"),
+                # can be put back (used in the last RESTORE_DAYS days, and the product's still there), as in History
+                "can_restore": bool(p and l.get("status") in (STATUS_CONSUMED, STATUS_THROWN) and int(l.get("ts") or 0) >= restore_from),
+                **({"shop": (shops.get(l.get("shop") or "") or {}).get("name") or ""} if kind == "booked" else {})}
     entries = [entry(l) for l in logs]
     users = sorted(people, key=lambda u: -people[u][0])
     prev = _flow_prev(ctx, kind, start, end) if ctx.since else None
@@ -1166,7 +1176,16 @@ def _flow_prev(ctx: _Ctx, kind: str, start: date, end: date) -> dict:
     has got, while this one isn't over); or the same number of days before."""
     span = (end - start).days + 1
     unit, full = "days", span
-    if span == 1:
+    chosen = getattr(ctx, "unit", None)
+    if chosen == "week" and start.weekday() == 0 and span <= 7:
+        unit, full, p_start = "week", 7, start - timedelta(days=7)
+    elif chosen == "month" and start.day == 1 and end.month == start.month and end.year == start.year:
+        unit, full = "month", _month_end(start).day
+        p_start = (start - timedelta(days=1)).replace(day=1)
+    elif chosen == "year" and start.month == 1 and start.day == 1 and end.year == start.year:
+        unit, full = "year", 366 if (start.year % 4 == 0 and (start.year % 100 or start.year % 400 == 0)) else 365
+        p_start = start.replace(year=start.year - 1)
+    elif span == 1:
         unit, p_start = "day", start - timedelta(days=1)
     elif start.weekday() == 0 and span <= 7:
         unit, full, p_start = "week", 7, start - timedelta(days=7)
@@ -1408,7 +1427,7 @@ def r_product(ctx: _Ctx, pid: str | None) -> dict:
 
 async def async_report(food: CrowFood, user, name: str, days: int | None = None, month: str | None = None,
                        product_id: str | None = None, filt: dict | None = None, since: str | None = None,
-                       until: str | None = None, year: int | None = None) -> dict:
+                       until: str | None = None, year: int | None = None, unit: str | None = None) -> dict:
     if name not in NAMES:
         raise FoodError("bad", "Unknown report.")
     timeless = name in ("month", "habits", "meals", "items", "stock", "expiry", "freezer", "product", "year", "seasons", "week")
@@ -1417,6 +1436,8 @@ async def async_report(food: CrowFood, user, name: str, days: int | None = None,
     if d_since and d_until and d_until < d_since:
         d_since, d_until = d_until, d_since
     ctx = _Ctx(food, user.id, None if timeless else days, d_since, d_until)
+    # what was chosen: on a Monday this week is just today, but it's still this week (compared with last week)
+    ctx.unit = unit if d_since else None
     if name == "month":
         out = r_month(ctx, month)
     elif name in ("waste", "people", "drill", "consumed", "booked"):

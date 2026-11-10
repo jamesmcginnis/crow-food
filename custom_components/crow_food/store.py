@@ -399,6 +399,11 @@ class CrowFood:
         if seen is None:
             return
         up = [pid for pid, q in now.items() if q > seen.get(pid, 0) + 1e-9]
+        # bought again: This Week's Running Out goes back to watching it (Not Needed lasts until then)
+        for pid in up:
+            p = self.data["products"].get(pid)
+            if p and p.pop("week_skip", None):
+                self._save()
         if up and self.on_stock_up:
             try:
                 self.on_stock_up(up)

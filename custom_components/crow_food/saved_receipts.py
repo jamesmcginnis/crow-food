@@ -150,6 +150,13 @@ def listing(food: CrowFood) -> dict:
             "months": int((food.settings.get("receipts") or {}).get("months", 12) or 0)}
 
 
+def for_product(food: CrowFood, pid: str) -> dict:
+    """The receipts something was added from, newest first (for its page)."""
+    recs = sorted((r for r in (food.data.get("receipts") or {}).values()
+                   if not r.get("pending") and pid in (r.get("products") or [])), key=lambda r: -r["at"])
+    return {"receipts": [row_out(food, r) for r in recs[:50]], "count": len(recs)}
+
+
 def stats(food: CrowFood) -> dict:
     recs = [r for r in (food.data.get("receipts") or {}).values() if not r.get("pending")]
     files = [f for r in recs for f in r["files"]]
