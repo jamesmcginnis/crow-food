@@ -32,9 +32,11 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 - **Storages** — as many as you like, with their own colour and icon, nested up to three deep, shared with everyone or only some people
 - **Smart lists** — All, Open, Soon to be Expired, Expired, Soon to Run Out and Not Bought Lately
 - **Shopping lists** — grouped by shop with running totals, a Bought section and **Put Away**, which sends everything back to where it usually lives
+- **Suggestions on lists** — photos drifting across the top of a list of what it might need and isn’t on it yet: running low, running out this week, then things you use regularly with none at home (on a list for eating, what needs using soonest). Tap one for its page. On for Shopping and Basket to start with, and switched on or off for each list in the editor under Storages & Lists
 - **Products** — photos, barcodes, categories, tags, package sizes, prices, links, notes and a minimum quantity
 - **Swipes** — swipe left for Edit and Delete, swipe right to mark something consumed (or bought, on a shopping list)
 - **Press and hold** — Consumed, Thrown, Move, Min quantity, Open, Buy, Print label, Edit, History, Delete and Ask AI
+- **Look Up a Food** — the second tab in Ask (with About This Food on): type any food, scan a barcode or photograph it, and see how to store it, how long it keeps, a typical serving and ideas, with its scores (the real ones for a barcode or something you have, typical ones otherwise), whether you have it at home, and Add to Shopping or straight into the right storage
 - **Barcode scanning** — with the phone's camera (including the iPhone), new barcodes looked up on Open Food Facts by Home Assistant
 - **PDFs** — printable lists and labels (A4 sheets of 21)
 - **Daily reminder** — expiring, expired and running-low food, sent to the phones of the people you choose
