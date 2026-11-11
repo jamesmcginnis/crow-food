@@ -22,7 +22,7 @@ from .store import CrowFood, FoodError, now_ms
 _LOGGER = logging.getLogger(__name__)
 
 SCHEMA = 1
-USER_AGENT = "CrowFood/0.0.2 (Home Assistant integration; https://github.com/jamesmcginnis/crow-food)"
+USER_AGENT = "CrowFood/0.0.3 (Home Assistant integration; https://github.com/jamesmcginnis/crow-food)"
 GI = ("low", "medium", "high", "unknown")
 
 # ── Asking the photo and product services ─────────────────────────────────────────────────────────────
