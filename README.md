@@ -62,7 +62,6 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 - **Overview** — **Photo Strip** (everything in every storage, in a random order, drifting slowly across the top; tap one for its page; each storage's page can have its own, switched on per storage in the editor under Storages & Lists, where tapping a photo jumps to its row), a Today line (what to use today, what's running low, what's gone off), the numbers for Use Soon, Open, Gone Off, Running Low and Everything, **Coming Up** (photos of what goes off today, tomorrow, this week and later), then your storages and lists as tiles. Each storage tile shows how fresh things are inside, and any sensors you've given it
 - **Freshness at a glance** — a coloured edge on every item (green fresh, yellow use soon, orange today, red gone off), with a word only when it's soon, and a small picture of whoever added it. Storages group by category to start with, or by freshness from each storage's ⋯ menu
 - **Item page** — tap something at home for a big photo, a freshness ring, one row of actions (Consume, Throw, Open, Freeze, Buy) and folding sections: where it is in your kitchen, how long it keeps, and its history
-- **Sensors on storages** — give a storage a temperature sensor and a door sensor (Edit → Sensors) and its tile and page show the reading, and when the door's open
 - **Ask** — the speech bubble at the top answers “Do we have tuna?” and the like straight away, even with the AI off
 - **Look Up a Food** — the second tab in Ask (with About This Food on): type any food, scan a barcode or photograph it, and see how to store it, how long it keeps, a typical serving and ideas, with its scores (the real ones for a barcode or something you have, typical ones otherwise), whether you have it at home, and Add to Shopping or straight into the right storage
 - **Storages** — as many as you like, with their own colour and icon, nested up to three deep, shared with everyone or only some people
@@ -77,6 +76,7 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 - **Swipes** — swipe left for Edit and Delete, swipe right to mark something consumed or thrown (or bought, on a shopping list)
 - **Photos full size** — tap the big photo at the top of a product's page to see it full size; pinch or double tap to zoom
 - **Press and hold** — Consumed, Thrown, Move, Min quantity, Open, Buy, Print label, Edit, History, Delete and Ask AI
+- **Add from a Photo** (AI) — photograph the shopping laid out on the side or a shelf and everything in it is listed to check and add in one go, with any best-before dates read off the packs
 - **Barcode scanning** — with the phone's camera (including the iPhone), new barcodes looked up on Open Food Facts by Home Assistant
 - **PDFs** — printable lists and labels (A4 sheets of 21)
 - **Daily reminder** — expiring, expired and running-low food, sent to the phones of the people you choose
@@ -138,6 +138,7 @@ The editor is laid out as a list of pages, each with **This Card** settings (onl
 | **Best-Before Estimate** | A ✦ button by Expiration date guesses a sensible date from the product, where it's kept and whether it's open |
 | **Category & Tags** | A ✦ button by Category suggests a category and tags |
 | **Photo to Product** | Photograph a packet: its name, size and best-before date are read from it (needs an AI that can look at photos) |
+| **Add from a Photo** | Photograph your shopping laid out, in the bags or on a shelf (up to 6 photos): everything the AI can see is listed with how many, where it goes and any best-before dates it can read, to check before adding. The photos are deleted straight after (needs an AI that can look at photos) |
 | **Use It Up** | The Overview's ⋯ menu: what to eat first, with ideas |
 | **Shopping Suggestions** | A shopping list's ⋯ menu: things you usually buy that are running low |
 | **Ask AI** | Questions about what's in the house |

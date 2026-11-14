@@ -37,6 +37,7 @@ Open a dashboard, click **Edit** → **+ Add Card** and search for **Crow Food**
 - **Swipes** — swipe left for Edit and Delete, swipe right to mark something consumed (or bought, on a shopping list)
 - **Press and hold** — Consumed, Thrown, Move, Min quantity, Open, Buy, Print label, Edit, History, Delete and Ask AI
 - **Look Up a Food** — the second tab in Ask (with About This Food on): type any food, scan a barcode or photograph it, and see how to store it, how long it keeps, a typical serving and ideas, with its scores (the real ones for a barcode or something you have, typical ones otherwise), whether you have it at home, and Add to Shopping or straight into the right storage
+- **Add from a Photo** (AI) — photograph the shopping laid out on the side or a shelf and everything in it is listed to check and add in one go, with any best-before dates read off the packs
 - **Barcode scanning** — with the phone's camera (including the iPhone), new barcodes looked up on Open Food Facts by Home Assistant
 - **PDFs** — printable lists and labels (A4 sheets of 21)
 - **Daily reminder** — expiring, expired and running-low food, sent to the phones of the people you choose
