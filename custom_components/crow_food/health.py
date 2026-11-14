@@ -96,7 +96,7 @@ def checks() -> list[dict]:
                     "No AI Task: choose one on the AI page, or set Home Assistant’s own in Settings"}
         name = (food.hass.states.get(ent).attributes.get("friendly_name") if food.hass.states.get(ent) else None) or ent
         if not ai.supports_photos(food.hass, ent):
-            return {"status": "warn", "note": f"{name} found, but it can’t look at photos (Photo to Product and receipt photos won’t work). Use Test AI to check it answers"}
+            return {"status": "warn", "note": f"{name} found, but it can’t look at photos (Photo to Product, Add from a Photo and receipt photos won’t work). Use Test AI to check it answers"}
         return {"status": "ok", "note": f"{name} found, and it can look at photos (use Test AI to check it answers)"}
 
     async def assist_check(food: CrowFood) -> dict:

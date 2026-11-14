@@ -103,6 +103,10 @@ def _str(value: Any, limit: int = 200) -> str:
     return str(value or "").strip()[:limit]
 
 
+# what storages kept for their sensors before 0.0.3, when that was taken out
+_OLD_SENSOR_KEYS = ("temp_entity", "door_entity")
+
+
 def _strip_tags(data: dict) -> bool:
     """Tags aren't used any more: takes any off the products (old data and backups). True if there were some."""
     found = False
@@ -215,6 +219,12 @@ class CrowFood:
         stored.setdefault("runouts_since", today())
         stored.setdefault("secret", secrets.token_hex(16))
         untagged = _strip_tags(stored)
+        # storages used to have a temperature and a door sensor (taken out in 0.0.3): tidied away once
+        unsensored = False
+        for st in (stored.get("storages") or {}).values():
+            for key in _OLD_SENSOR_KEYS:
+                if isinstance(st, dict) and st.pop(key, None) is not None:
+                    unsensored = True
         builtins = _ensure_builtins(stored)
         self.ai_cache = (await self._ai_store.async_load() or {}).get("answers") or {}
         history = await self._history_store.async_load()
@@ -234,7 +244,7 @@ class CrowFood:
                 self.settings["history_days"] = DEFAULT_SETTINGS["history_days"]
             self.settings["history_v"] = 1
             await self._settings_store.async_save(self.settings)
-        if self._trim_logs() or moved or untagged or builtins:
+        if self._trim_logs() or moved or untagged or builtins or unsensored:
             await self._history_store.async_save(self._history_out())
             await self._store.async_save(self._data_out())
         await self.hass.async_add_executor_job(self._make_dirs)
@@ -1017,17 +1027,11 @@ class CrowFood:
         }
         if kind == KIND_LIST:
             row["purpose"] = purpose
-            row.pop("temp_entity", None)
-            row.pop("door_entity", None)
         else:
             row.pop("purpose", None)
-            # live readings shown on the storage: a temperature sensor and a door sensor from Home Assistant
-            for key, domains in (("temp_entity", ("sensor.",)), ("door_entity", ("binary_sensor.",))):
-                v = _str(data.get(key, (old or {}).get(key) or ""), 120)
-                if v and v.startswith(domains) and " " not in v:
-                    row[key] = v
-                else:
-                    row.pop(key, None)
+        # storages used to have a temperature and a door sensor (taken out in 0.0.3)
+        for key in _OLD_SENSOR_KEYS:
+            row.pop(key, None)
         sharing_changed = old is not None and sorted(old.get("users") or []) != sorted(users)
         self.data["storages"][row["id"]] = row
         if sharing_changed:

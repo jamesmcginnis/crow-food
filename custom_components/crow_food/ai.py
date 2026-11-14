@@ -7,6 +7,7 @@ Features:
 * expiry     - estimates a best-before date for something without one (from its name, category and storage)
 * categorise - suggests a category for a product
 * photo      - Photo to Product: reads the name, size and best-before date from a photo of the packet
+* photo_items - Add from a Photo: lists everything in photos of the shopping (laid out, in the bags or on a shelf)
 * barcode    - reads a barcode's number from a photo when the card couldn't (for phones without live scanning)
 * use_up     - a short "use these first" summary of what's open or expiring
 * shopping   - suggests things to add to a shopping list from what usually gets bought and what's low
@@ -33,8 +34,8 @@ _LOGGER = logging.getLogger(__name__)
 
 TIMEOUT = 90
 ASK_TIMEOUT = 75   # Ask AI gives up before the card does (100 seconds), so the card shows why
-FEATURES = ("expiry", "categorise", "photo", "barcode", "use_up", "shopping", "ask", "info", "recap", "catchup", "receipt", "voice")
-NEEDS_PHOTOS = ("photo", "barcode")
+FEATURES = ("expiry", "categorise", "photo", "barcode", "use_up", "shopping", "ask", "info", "recap", "catchup", "receipt", "voice", "photo_items")
+NEEDS_PHOTOS = ("photo", "barcode", "photo_items")
 
 FRIENDLY = {
     "busy": "The AI is busy or has reached its usage limit right now. Try again in a little while.",
@@ -259,7 +260,7 @@ def _inventory_lines(food: CrowFood, uid: str, limit: int = 250) -> list[str]:
 DAY = 86400000
 KEEP = {"expiry": 30 * DAY, "categorise": 90 * DAY, "use_up": 6 * 3600000, "shopping": 12 * 3600000,
         "ask": 30 * 60000, "photo": None, "barcode": None, "recap": 7 * DAY, "catchup": DAY, "receipt": 7 * DAY,
-        "voice": DAY, "transcribe": None, "receipt_lines": 7 * DAY, "receipt_match": 7 * DAY}
+        "voice": DAY, "photo_items": DAY, "transcribe": None, "receipt_lines": 7 * DAY, "receipt_match": 7 * DAY}
 
 
 def _fp(*parts: Any) -> str:
@@ -312,6 +313,10 @@ def _cache_key(food: CrowFood, user, feature: str, data: dict) -> tuple[str, str
         return f"receipt_match|{_fp(data.get('lines'))}", _fp(len(food.data["products"]), len(food.data["storages"]), len(food.data["categories"]))
     if feature == "voice":
         return f"voice|{getattr(user, 'id', '')}|{low('text')}", _fp(len(food.data["products"]))
+    if feature == "photo_items":
+        hashes = [(food.data.get("photos", {}).get(str(p)) or {}).get("hash") for p in data.get("photos") or []]
+        return ((f"photo_items|{'|'.join(hashes)}|{low('storage')}", _fp(len(food.data["products"])))
+                if hashes and all(hashes) else None)
     if feature == "ask":
         return f"ask|{getattr(user, 'id', '')}|{low('question')}", _fp(_stock_fp(food), dt_util.now().date().isoformat())
     return None
@@ -337,8 +342,9 @@ async def async_run(hass: HomeAssistant, food: CrowFood, user, feature: str, dat
             out = dict(hit["v"])
             if feature == "expiry" and "days" in out:   # the date moves on with today
                 out["expires"] = (dt_util.now().date() + timedelta(days=int(out["days"]))).isoformat()
-            if feature in ("receipt", "voice"):   # the dates move on with today too
-                out["items"] = [{**r, "expires": (dt_util.now().date() + timedelta(days=int(r["days"]))).isoformat() if r.get("days") else None}
+            if feature in ("receipt", "voice", "photo_items"):   # the dates move on with today too (not one read off a pack)
+                out["items"] = [r if r.get("date_from") == "pack" else
+                                {**r, "expires": (dt_util.now().date() + timedelta(days=int(r["days"]))).isoformat() if r.get("days") else None}
                                 for r in out.get("items") or []]
             if feature == "categorise" and out.get("category") not in food.data["categories"]:
                 out = None
@@ -621,7 +627,7 @@ async def _run(hass: HomeAssistant, food: CrowFood, user, feature: str, data: di
     if feature == "receipt_match":
         return await _receipt_match(hass, food, user, data, today)
 
-    if feature in ("receipt", "voice"):
+    if feature in ("receipt", "voice", "photo_items"):
         return await _read_items(hass, food, user, feature, data, today)
 
     # ask
@@ -765,6 +771,44 @@ async def _read_items(hass: HomeAssistant, food: CrowFood, user, feature: str, d
             "several pictures that overlap; count anything shown twice only once. Read the shop's name from it.\n" + ask),
             attachments=[{"media_content_id": f"media-source://{DOMAIN}/{pid}", "media_content_type": food.photo_mime(pid)} for pid in pids],
             timeout=240)
+    elif feature == "photo_items":
+        pids = [str(p) for p in (data.get("photos") or [])][:6]
+        if not pids:
+            raise FoodError("bad", "Take a photo first.")
+        if not supports_photos(hass, task_entity(hass, food)):
+            raise FoodError("ai_failed", FRIENDLY["no_photos"])
+        for pid in pids:
+            if not await hass.async_add_executor_job(food.photo_path(pid).is_file):
+                raise FoodError("bad", "That photo has gone. Take it again.")
+        into = food.visible_storages(uid).get(str(data.get("storage") or "")) or {}
+        text = await _task(hass, food, "Crow Food: add from a photo", (
+            f"Today is {today.isoformat()}.\n"
+            "These photos show food or household products someone has just bought or is putting away: laid out on a "
+            "table or worktop, in shopping bags, or on a fridge, freezer or cupboard shelf. Several photos may overlap or "
+            "show the same things from another side: count each thing only once.\n"
+            "List EVERY product you can see, one entry per different product. qty is how many of it you can see (count "
+            "the packs, tins, bottles and boxes; a multipack still in its wrapper is one). Leave out bags, receipts, "
+            "people, furniture and anything you can't make out at all.\n"
+            "name is the product's full name as the shop's website would write it (brand, product and size) from what's "
+            "printed on it; where the brand can't be read, say plainly what it is (\"Bananas\", \"Semi-skimmed milk 4 pints\").\n"
+            "printed_date is a best-before or use-by date only where you can clearly read it in the photo (as YYYY-MM-DD; "
+            "if only a month and year are shown, the last day of that month), otherwise empty. Never guess one there.\n"
+            "This household's products are numbered below. Give a number only when it is the SAME product: same brand, "
+            "same kind of food and, where both say, the same size. Something merely similar is not the same. If unsure, "
+            "give 0.\n"
+            f"Their storages: {', '.join(s['name'] for s in storages)}. "
+            + (f"These are going in {into['name']}, unless something clearly belongs elsewhere (frozen food in a freezer). "
+               if into else "If the photo is of a fridge, freezer or cupboard shelf, that's where they are; otherwise ")
+            + "frozen food goes in a freezer, chilled food in a fridge, the rest in a cupboard or pantry; household "
+            "things where they'd best fit.\n"
+            f"Their categories: {', '.join(c['name'] for c in cats.values()) or '(none)'}.\n"
+            "keeps_days: how many days it keeps from today where it's stored (unopened).\n" + CAREFUL +
+            f"Their products:\n{known or '(none yet)'}\n\n"
+            'Answer with JSON only: {"items": [{"known": <number or 0>, "name": "...", "qty": <how many>, '
+            '"content": <size of one pack or 0>, "content_unit": "g|kg|ml|l|piece|slice|", "storage": "...", '
+            '"category": "...", "printed_date": "YYYY-MM-DD or empty", "keeps_days": <whole number>}]}'),
+            attachments=[{"media_content_id": f"media-source://{DOMAIN}/{pid}", "media_content_type": food.photo_mime(pid)} for pid in pids],
+            timeout=240)
     else:
         said = str(data.get("text") or "").strip()[:1500]
         if not said:
@@ -790,7 +834,11 @@ async def _read_items(hass: HomeAssistant, food: CrowFood, user, feature: str, d
         if not name:
             continue
         num = lambda k, d=0.0: _float(r.get(k), d)  # noqa: E731
-        storage = (food.usual_storage(prod["id"], uid) if prod else None) or by_name.get(str(r.get("storage") or "").lower())
+        said_st = by_name.get(str(r.get("storage") or "").lower())
+        if feature == "photo_items":
+            storage = said_st or (food.usual_storage(prod["id"], uid) if prod else None)
+        else:
+            storage = (food.usual_storage(prod["id"], uid) if prod else None) or said_st
         storage = storage or next((sid for nm, sid in by_name.items() if str(r.get("storage") or "").lower() in nm), None) or storages[0]["id"]
         cat = str(r.get("category") or "").lower()
         cid = prod.get("category") if prod else next((c["id"] for c in cats.values() if c["name"].lower() == cat), None)
@@ -807,6 +855,15 @@ async def _read_items(hass: HomeAssistant, food: CrowFood, user, feature: str, d
             days, source = guess, "ai"
         else:
             days, source = None, ""
+        printed = str(r.get("printed_date") or "")
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", printed):
+            try:
+                pd = date.fromisoformat(printed)
+            except ValueError:
+                pd = None
+            # a date that can't be right (years ago, or decades ahead) is a misreading: the estimate stands
+            if pd and today - timedelta(days=60) <= pd <= today + timedelta(days=3650):
+                days, source = (pd - today).days, "pack"
         qty = max(1.0, round(num("qty", 1.0), 2))
         line = round(max(0.0, num("line_total")), 2)
         price = round(line / qty, 2) if line else round(max(0.0, num("price")), 2)
@@ -816,7 +873,7 @@ async def _read_items(hass: HomeAssistant, food: CrowFood, user, feature: str, d
                      "content": max(0.0, num("content")),
                      "content_unit": str(r.get("content_unit") or "")[:10].lower() if not prod else (prod.get("content_unit") or str(r.get("content_unit") or "")[:10].lower()),
                      "storage": storage, "category": cid, "hist_n": n,
-                     "expires": (today + timedelta(days=days)).isoformat() if days else None, "days": days, "date_from": source})
+                     "expires": (today + timedelta(days=days)).isoformat() if days or source == "pack" else None, "days": days, "date_from": source})
     shop_name = str(out.get("shop") or data.get("shop") or "").strip()[:60]
     shop = None
     if shop_name:
